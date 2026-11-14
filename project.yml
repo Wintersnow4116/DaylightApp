@@ -1,0 +1,67 @@
+name: DaylightApp
+options:
+  minimumXcodeGenVersion: "2.44.0"
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+
+packages:
+  DaylightCore:
+    path: SharedCore
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    GENERATE_INFOPLIST_FILE: "YES"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  DaylightIOS:
+    type: application
+    platform: iOS
+    sources:
+      - iOSApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.daylight.ios
+        INFOPLIST_KEY_CFBundleDisplayName: Daylight
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: "NO"
+    dependencies:
+      - package: DaylightCore
+        product: DaylightCore
+
+  # Modern single-target watchOS app, built separately from the iOS app.
+  DaylightWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - WatchApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.daylight.watch
+        INFOPLIST_KEY_CFBundleDisplayName: Daylight
+        INFOPLIST_KEY_WKApplication: "YES"
+        INFOPLIST_KEY_WKWatchOnly: "YES"
+        TARGETED_DEVICE_FAMILY: "4"
+    dependencies:
+      - package: DaylightCore
+        product: DaylightCore
+
+schemes:
+  DaylightIOS:
+    build:
+      targets:
+        DaylightIOS: all
+    run:
+      config: Debug
+  DaylightWatch:
+    build:
+      targets:
+        DaylightWatch: all
+    run:
+      config: Debug

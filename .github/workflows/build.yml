@@ -1,0 +1,83 @@
+name: Build Daylight apps
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daylight-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Standard macOS runner; no -large or -xlarge label.
+    # macos-26 ships Swift 6.3, below SharedCore's tools-version 6.4.
+    # The xcode-27 image is currently a public preview image.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Inspect Xcode and Swift toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun swift --version
+          xcodebuild -showsdks
+          # Fails explicitly if the selected compiler cannot read tools 6.4.
+          xcrun swift package --package-path SharedCore dump-package > /dev/null
+
+      - name: Test SharedCore
+        working-directory: SharedCore
+        run: xcrun swift test
+
+      - name: Install XcodeGen
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen > /dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        id: generate
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml
+          xcodebuild -list -project DaylightApp.xcodeproj
+
+      - name: Build iOS Simulator
+        run: |
+          xcodebuild \
+            -project DaylightApp.xcodeproj \
+            -scheme DaylightIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/iOS \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Build watchOS Simulator
+        # Still validate watchOS if only the iOS build failed.
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        run: |
+          xcodebuild \
+            -project DaylightApp.xcodeproj \
+            -scheme DaylightWatch \
+            -configuration Debug \
+            -sdk watchsimulator \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath build/watchOS \
+            CODE_SIGNING_ALLOWED=NO \
+            build
