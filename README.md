@@ -1,21 +1,23 @@
 # DaylightApp
 
-原生 SwiftUI iOS + watchOS 基础应用，共享现有的 `SharedCore` 本地 Swift Package。
+原生 SwiftUI iOS + watchOS 应用，共享现有的 `SharedCore` 本地 Swift Package。
+Phase 3A 提供 iPhone 上的计时、持久化记录、最近 7 天历史与每日目标设置。
 
 ## 模块
 
-- `SharedCore`：现有 DaylightCore 业务模型及 Swift Testing 测试，保持不变。
-- `iOSApp`：独立 `@main` 入口、iOS 17+ 进度界面和手动增加 5 分钟按钮。
+- `SharedCore`：保留 DaylightProgress，新增经校验的 Session、自然日汇总、可恢复的 Journal 和原子文件存储，以及 Swift Testing 测试。
+- `iOSApp`：独立 `@main` 入口、iOS 17+ 今日计时、历史、补记和目标设置，MainActor 管理界面状态。
 - `WatchApp`：独立 `@main` 入口、watchOS 10+ 进度界面和手动增加 5 分钟按钮。
 - `project.yml`：XcodeGen 工程源，两个独立 application target 和共享 scheme，分别链接本地 `DaylightCore` product。
 - `.github/workflows/build.yml`：SharedCore 测试、安装 XcodeGen、生成工程和两个 Simulator 构建。
 
-界面调用已核对的 `DaylightProgress()`、`outdoorMinutes`、`goalMinutes`、
-`completionRatio`、`remainingMinutes`、`recordOutdoorMinutes(_:)`。
-默认目标为 30 分钟，进度计算与边界处理均由 SharedCore 提供。
+`DailyDaylightSummary` 复用已核对的 DaylightProgress 公开 API 计算目标比例及剩余分钟。
+默认目标为 30 分钟；精确时长以起止时间的秒数差计算，按日累计后向下取完整分钟计算比例。
 
-本阶段每个界面使用独立的 `@State` 内存模型；重新启动后恢复为零。
-尚未实现持久化、跨日归档/自动重置、后台计时、自动户外检测或设备同步。
+iPhone 将已完成记录、进行中的起始时间和每日目标保存在 Application Support，
+重新启动后恢复。跨日记录使用当前日历与时区切分，不需要午夜清空任何数据。
+这些记录由用户主动声明，不是传感器测量的真实日光暴露。
+WatchApp 保留第二阶段的独立内存演示模型，尚未实现持久化或设备同步。
 Watch target 使用现代单 target watch-only 配置，不嵌入 iOS app；
 两个 Simulator 构建不代表配对安装或同步已经实现。
 
@@ -72,6 +74,8 @@ Bundle ID 暂用 `org.example.daylight.ios` 和 `org.example.daylight.watch`。
 ## 验证边界
 
 Windows 的包测试和配置静态检查不能证明 SwiftUI 已通过 Xcode 编译。
-首次 GitHub Actions 运行仍需确认：Runner/工具链可用、包在 macOS 上的测试、
-XcodeGen 生成结果、两个平台的 SwiftUI 类型检查、链接和 app 打包。
-本阶段不声称已完成 Simulator 启动、界面实机验证、配对安装或同步验证。
+第二阶段的 macOS CI 已由项目维护者确认通过；Phase 3A 尚未运行新的远端构建。
+本阶段仍需在 GitHub Actions 确认新增包代码和 iOS SwiftUI 代码的编译、链接及 app 打包。
+未执行 push；未声称已完成本阶段的 Xcode 构建、Simulator 启动、界面实机、配对或同步验证。
+
+详细数据规则、计时失败行为及手动验收步骤见 [Phase 3A 说明](docs/PHASE3A.md)。
