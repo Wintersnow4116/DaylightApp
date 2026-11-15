@@ -10,11 +10,20 @@ struct DaylightProgressView: View {
             if store.isLoaded {
                 TabView {
                     TodayView(store: store)
-                        .tabItem { Label("今日", systemImage: "sun.max") }
+                        .tabItem {
+                            Label("今日", systemImage: "sun.max")
+                                .accessibilityIdentifier("tab.today")
+                        }
                     DaylightHistoryView(store: store)
-                        .tabItem { Label("历史", systemImage: "calendar") }
+                        .tabItem {
+                            Label("历史", systemImage: "calendar")
+                                .accessibilityIdentifier("tab.history")
+                        }
                     DaylightSettingsView(store: store)
-                        .tabItem { Label("设置", systemImage: "gearshape") }
+                        .tabItem {
+                            Label("设置", systemImage: "gearshape")
+                                .accessibilityIdentifier("tab.settings")
+                        }
                 }
             } else {
                 VStack(spacing: 20) {
@@ -53,6 +62,7 @@ private struct TodayView: View {
                 today(at: Date())
             }
             .navigationTitle("今日户外活动")
+            .accessibilityIdentifier("screen.today")
         }
     }
 
@@ -74,6 +84,8 @@ private struct TodayView: View {
                         .font(.title.bold()).monospacedDigit()
                         .accessibilityLabel("今日累计 \(DaylightFormatting.duration(summary.totalDuration))")
                     Text("每日目标：\(summary.progress.goalMinutes) 分钟")
+                        .accessibilityIdentifier("today.goal")
+                        .accessibilityValue(String(summary.progress.goalMinutes))
                     ProgressView(value: summary.completionRatio, total: 1)
                         .tint(.orange)
                         .accessibilityLabel("今日目标进度")
@@ -90,10 +102,15 @@ private struct TodayView: View {
                 }
                 if let active = store.journal.activeSession {
                     Text("本次计时").font(.headline)
+                        .accessibilityIdentifier("today.activeSession.\(active.id.uuidString)")
                     Text(DaylightFormatting.duration(active.elapsed(at: now)))
                         .font(.title2).monospacedDigit()
+                        .accessibilityIdentifier("today.elapsedSeconds")
+                        .accessibilityLabel("本次计时（秒）")
+                        .accessibilityValue(String(Int(active.elapsed(at: now))))
                     Text("开始于 \(active.start.formatted(date: .abbreviated, time: .standard))")
                         .font(.footnote)
+                        .accessibilityIdentifier("today.sessionStart")
                     if now < active.start {
                         Text("系统时间早于开始时间。请校正时间后结束记录；已保存的开始时间保持不变。")
                             .foregroundStyle(.red)
@@ -102,12 +119,14 @@ private struct TodayView: View {
                         Task { await store.finish() }
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("today.endSession")
                     .disabled(store.isBusy)
                 } else {
                     Button { Task { await store.start() } } label: {
                         Label("开始户外活动", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("today.startSession")
                     .disabled(store.isBusy)
                 }
                 if store.isBusy { ProgressView("正在保存") }

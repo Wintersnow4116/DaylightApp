@@ -11,11 +11,13 @@ struct DaylightHistoryView: View {
                 history(at: Date())
             }
             .navigationTitle("最近 7 天")
+            .accessibilityIdentifier("screen.history")
             .toolbar {
                 Button { showingManualEntry = true } label: {
                     Label("补记活动", systemImage: "plus")
                 }
                 .disabled(store.isBusy)
+                .accessibilityIdentifier("history.addSession")
             }
             .sheet(isPresented: $showingManualEntry) {
                 ManualSessionView(store: store)
@@ -55,6 +57,7 @@ struct DaylightHistoryView: View {
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
+                            .accessibilityIdentifier("history.session.\(segment.session.id.uuidString).day.\(summary.day.timeIntervalSince1970)")
                         }
                     } header: {
                         Text(summary.day, format: .dateTime.month().day().weekday())
@@ -74,6 +77,9 @@ private struct SessionDetailView: View {
                 detail("开始", segment.session.start.formatted(date: .complete, time: .standard))
                 detail("结束", segment.session.end.formatted(date: .complete, time: .standard))
                 detail("记录时长", DaylightFormatting.duration(segment.session.duration))
+                    .accessibilityIdentifier("sessionDetail.duration")
+                    .accessibilityLabel("记录时长（秒）")
+                    .accessibilityValue(String(Int(segment.session.duration)))
                 detail("来源", "用户手动记录")
                 detail("记录 ID", segment.session.id.uuidString)
             }
@@ -86,6 +92,7 @@ private struct SessionDetailView: View {
             }
         }
         .navigationTitle("活动详情")
+        .accessibilityIdentifier("screen.sessionDetail")
     }
 
     private func detail(_ label: String, _ value: String) -> some View {

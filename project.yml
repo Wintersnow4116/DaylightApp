@@ -1,4 +1,8 @@
 name: DaylightApp
+configs:
+  Debug: debug
+  Release: release
+  UITesting: debug
 options:
   minimumXcodeGenVersion: "2.44.0"
   deploymentTarget:
@@ -31,6 +35,10 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: "NO"
+      configs:
+        UITesting:
+          PRODUCT_BUNDLE_IDENTIFIER: org.example.daylight.ios.uitesting
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DAYLIGHT_UI_TESTING"
     dependencies:
       - package: DaylightCore
         product: DaylightCore
@@ -52,6 +60,19 @@ targets:
       - package: DaylightCore
         product: DaylightCore
 
+  DaylightUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - DaylightUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.daylight.uitests
+        TEST_TARGET_NAME: DaylightIOS
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - target: DaylightIOS
+
 schemes:
   DaylightIOS:
     build:
@@ -65,3 +86,15 @@ schemes:
         DaylightWatch: all
     run:
       config: Debug
+  DaylightUITests:
+    build:
+      targets:
+        DaylightIOS: all
+        DaylightUITests: [test]
+    test:
+      config: UITesting
+      targets:
+        - name: DaylightUITests
+          parallelizable: false
+          randomExecutionOrder: true
+      captureScreenshotsAutomatically: true
