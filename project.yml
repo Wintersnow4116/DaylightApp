@@ -73,6 +73,19 @@ targets:
     dependencies:
       - target: DaylightIOS
 
+  DaylightWatchUITests:
+    type: bundle.ui-testing
+    platform: watchOS
+    sources:
+      - DaylightWatchUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.daylight.watch.uitests
+        TEST_TARGET_NAME: DaylightWatch
+        TARGETED_DEVICE_FAMILY: "4"
+    dependencies:
+      - target: DaylightWatch
+
 schemes:
   DaylightIOS:
     build:
@@ -95,6 +108,22 @@ schemes:
       config: UITesting
       targets:
         - name: DaylightUITests
+          parallelizable: false
+          randomExecutionOrder: true
+      captureScreenshotsAutomatically: true
+
+  DaylightWatchUITests:
+    build:
+      targets:
+        DaylightWatch: all
+        DaylightWatchUITests: [test]
+    run:
+      config: Debug
+      executable: DaylightWatch
+    test:
+      config: Debug
+      targets:
+        - name: DaylightWatchUITests
           parallelizable: false
           randomExecutionOrder: true
       captureScreenshotsAutomatically: true
