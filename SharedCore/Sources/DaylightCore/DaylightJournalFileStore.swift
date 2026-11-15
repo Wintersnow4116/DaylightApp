@@ -1,30 +1,45 @@
 import Foundation
 
 /// Serialized file I/O kept off the UI actor. The caller supplies a durable file location.
-public actor DaylightJournalFileStore {
+public actor DaylightJournalFileStore: DaylightJournalStorage {
     private let fileURL: URL
+    private let fileAccess: any DaylightJournalFileAccess
+    private var validatedExistingState = false
 
-    public init(fileURL: URL) {
+    public init(
+        fileURL: URL,
+        fileAccess: any DaylightJournalFileAccess = FoundationDaylightJournalFileAccess()
+    ) {
         self.fileURL = fileURL
+        self.fileAccess = fileAccess
     }
 
     public func load() throws -> DaylightJournal {
+        validatedExistingState = false
         let data: Data
         do {
-            data = try Data(contentsOf: fileURL)
+            data = try fileAccess.read(from: fileURL)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            validatedExistingState = true
             return DaylightJournal()
         }
         // Permission, corruption and schema errors propagate; never silently reset data.
-        return try JSONDecoder().decode(DaylightJournal.self, from: data)
+        let journal = try JSONDecoder().decode(DaylightJournal.self, from: data)
+        validatedExistingState = true
+        return journal
     }
 
     public func save(_ journal: DaylightJournal) throws {
+        // A fresh store must not overwrite unreadable/corrupt existing data, even
+        // when its caller forgot to load first. Failed saves require validation again.
+        if !validatedExistingState { _ = try load() }
         let data = try JSONEncoder().encode(journal)
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        // Write an auxiliary file and replace the destination only after the write completes.
-        try data.write(to: fileURL, options: .atomic)
+        do {
+            try fileAccess.createDirectory(at: fileURL.deletingLastPathComponent())
+            try fileAccess.writeAtomically(data, to: fileURL)
+        } catch {
+            validatedExistingState = false
+            throw error
+        }
     }
 }

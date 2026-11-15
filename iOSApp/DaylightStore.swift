@@ -9,21 +9,27 @@ final class DaylightStore: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var referenceDate = Date()
     @Published var errorMessage: String?
-    private var fileStore: DaylightJournalFileStore?
+    private var fileStore: (any DaylightJournalStorage)?
+
+    init(storage: (any DaylightJournalStorage)? = nil) {
+        fileStore = storage
+    }
 
     func load() async {
         guard !isBusy, !isLoaded else { return }
         isBusy = true
         defer { isBusy = false }
         do {
-            let support = try FileManager.default.url(
-                for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true
-            )
-            let storage = DaylightJournalFileStore(
-                fileURL: support.appendingPathComponent("DaylightApp", isDirectory: true)
-                    .appendingPathComponent("journal-v1.json")
-            )
+            let storage: any DaylightJournalStorage
+            if let fileStore {
+                storage = fileStore
+            } else {
+                let support = try FileManager.default.url(
+                    for: .applicationSupportDirectory, in: .userDomainMask,
+                    appropriateFor: nil, create: true
+                )
+                storage = DaylightJournalFileStore(fileURL: try journalURL(in: support))
+            }
             journal = try await storage.load()
             fileStore = storage
             isLoaded = true
@@ -35,6 +41,23 @@ final class DaylightStore: ObservableObject {
     }
 
     func refreshClock() { referenceDate = Date() }
+
+    private func journalURL(in support: URL) throws -> URL {
+        #if DAYLIGHT_UI_TESTING
+        // Only compiled into the separate UITesting app configuration. Never reset data
+        // on launch: a test's namespace must survive terminate/launch persistence checks.
+        guard let raw = ProcessInfo.processInfo.environment["DAYLIGHT_UI_TEST_NAMESPACE"],
+              let namespace = UUID(uuidString: raw) else {
+            throw UIStorageConfigurationError.missingNamespace
+        }
+        return support.appendingPathComponent("DaylightAppUITests", isDirectory: true)
+            .appendingPathComponent(namespace.uuidString, isDirectory: true)
+            .appendingPathComponent("journal-v1.json")
+        #else
+        return support.appendingPathComponent("DaylightApp", isDirectory: true)
+            .appendingPathComponent("journal-v1.json")
+        #endif
+    }
 
     func start() async {
         guard isLoaded, !isBusy, journal.activeSession == nil else { return }
@@ -105,6 +128,16 @@ final class DaylightStore: ObservableObject {
         }
     }
 }
+
+#if DAYLIGHT_UI_TESTING
+private enum UIStorageConfigurationError: LocalizedError {
+    case missingNamespace
+
+    var errorDescription: String? {
+        "UITesting configuration requires a UUID DAYLIGHT_UI_TEST_NAMESPACE; no journal was opened."
+    }
+}
+#endif
 
 enum DaylightFormatting {
     static func duration(_ seconds: TimeInterval) -> String {
