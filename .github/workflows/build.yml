@@ -1,4 +1,4 @@
-name: Build Daylight apps
+name: Validate Daylight iOS and watchOS
 
 on:
   push:
@@ -18,7 +18,8 @@ jobs:
     # macos-26 ships Swift 6.3, below SharedCore's tools-version 6.4.
     # The xcode-27 image is currently a public preview image.
     runs-on: xcode-27
-    timeout-minutes: 30
+    name: iOS and watchOS validation (macOS host)
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     defaults:
@@ -26,20 +27,36 @@ jobs:
         shell: bash
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare validation evidence
+        run: mkdir -p build/validation/settings build/ui-diagnostics build/TestResults
 
       - name: Inspect Xcode and Swift toolchain
         run: |
           set -euo pipefail
-          xcodebuild -version
-          xcrun swift --version
-          xcodebuild -showsdks
+          xcodebuild -version 2>&1 | tee build/validation/xcode-version.log
+          xcrun swift --version 2>&1 | tee build/validation/swift-version.log
+          xcodebuild -showsdks > build/validation/sdks.log 2>&1
           # Fails explicitly if the selected compiler cannot read tools 6.4.
-          xcrun swift package --package-path SharedCore dump-package > /dev/null
+          xcrun swift package --package-path SharedCore dump-package \
+            > build/validation/package.json 2> build/validation/package.stderr.log
 
       - name: Test SharedCore
+        id: sharedcore
         working-directory: SharedCore
-        run: xcrun swift test
+        run: |
+          set -euo pipefail
+          xcrun swift test 2>&1 | tee ../build/validation/sharedcore-tests.log
+
+      - name: Validate configuration syntax and CI script fixtures
+        id: fixtures
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; require "json"; ARGV.each { |path| YAML.load_file(path); puts "YAML syntax OK: #{path}" }; File.write("build/validation/project-spec.json", JSON.pretty_generate(YAML.load_file("project.yml")))' project.yml .github/workflows/build.yml 2>&1 | tee build/validation/yaml.log
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/ci/tests -v 2>&1 | tee build/validation/ci-fixtures.log
 
       - name: Install XcodeGen
         run: |
@@ -47,17 +64,50 @@ jobs:
           if ! command -v xcodegen > /dev/null 2>&1; then
             brew install xcodegen
           fi
-          xcodegen --version
+          xcodegen --version | tee build/validation/xcodegen-version.log
 
       - name: Generate Xcode project
         id: generate
         run: |
           set -euo pipefail
-          xcodegen generate --spec project.yml
-          xcodebuild -list -project DaylightApp.xcodeproj
+          xcodegen generate --spec project.yml 2>&1 | tee build/validation/xcodegen.log
+          xcodebuild -list -project DaylightApp.xcodeproj 2>&1 | tee build/validation/project-list.log
 
-      - name: Build iOS Simulator
+      - name: Verify independent SharedCore integration and resolved settings
+        id: integration
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
         run: |
+          set -euo pipefail
+          for app_scheme in DaylightIOS DaylightWatch; do
+            if [ "$app_scheme" = DaylightIOS ]; then
+              simulator_sdk=iphonesimulator
+              simulator_destination='generic/platform=iOS Simulator'
+            else
+              simulator_sdk=watchsimulator
+              simulator_destination='generic/platform=watchOS Simulator'
+            fi
+            for build_configuration in Debug Release UITesting; do
+              xcodebuild -project DaylightApp.xcodeproj -scheme "$app_scheme" \
+                -configuration "$build_configuration" -sdk "$simulator_sdk" \
+                -destination "$simulator_destination" -showBuildSettings -json \
+                CODE_SIGNING_ALLOWED=NO \
+                > "build/validation/settings/$app_scheme-$build_configuration.json" \
+                2> "build/validation/settings/$app_scheme-$build_configuration.stderr.log"
+            done
+          done
+          python3 scripts/ci/validate_integration.py \
+            --spec build/validation/project-spec.json \
+            --manifest build/validation/package.json \
+            --settings-directory build/validation/settings \
+            2>&1 | tee build/validation/integration.log
+
+      - name: Build iOS Simulator Debug
+        id: ios_debug
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
           xcodebuild \
             -project DaylightApp.xcodeproj \
             -scheme DaylightIOS \
@@ -66,12 +116,30 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build/iOS \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build 2>&1 | tee build/validation/iOS-Debug.log
 
-      - name: Build watchOS Simulator
-        # Still validate watchOS if only the iOS build failed.
+      - name: Build iOS Simulator Release
+        id: ios_release
         if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
         run: |
+          set -euo pipefail
+          xcodebuild \
+            -project DaylightApp.xcodeproj \
+            -scheme DaylightIOS \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/iOS-Release \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/validation/iOS-Release.log
+
+      - name: Build watchOS Simulator Debug
+        id: watch_debug
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
           xcodebuild \
             -project DaylightApp.xcodeproj \
             -scheme DaylightWatch \
@@ -80,4 +148,117 @@ jobs:
             -destination 'generic/platform=watchOS Simulator' \
             -derivedDataPath build/watchOS \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build 2>&1 | tee build/validation/watchOS-Debug.log
+
+      - name: Build watchOS Simulator Release
+        id: watch_release
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project DaylightApp.xcodeproj \
+            -scheme DaylightWatch \
+            -configuration Release \
+            -sdk watchsimulator \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath build/watchOS-Release \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/validation/watchOS-Release.log
+
+      - name: Discover and boot an available iPhone simulator
+        id: simulator
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        timeout-minutes: 10
+        run: python3 scripts/ci/select_simulator.py --minimum-ios 17.0
+
+      - name: Run iOS Simulator UI tests
+        id: ui_tests
+        if: ${{ !cancelled() && steps.simulator.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          mkdir -p build/TestResults build/ui-diagnostics
+          xcodebuild \
+            -project DaylightApp.xcodeproj \
+            -scheme DaylightUITests \
+            -configuration UITesting \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
+            -destination-timeout 120 \
+            -derivedDataPath build/UITests \
+            -resultBundlePath build/TestResults/DaylightUITests.xcresult \
+            -parallel-testing-enabled NO \
+            -maximum-concurrent-test-simulator-destinations 1 \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 120 \
+            -maximum-test-execution-time-allowance 180 \
+            -only-testing:DaylightUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee build/ui-diagnostics/xcodebuild-test.log
+
+      - name: Collect simulator diagnostics
+        if: ${{ always() && !cancelled() }}
+        timeout-minutes: 3
+        env:
+          SELECTED_SIMULATOR: ${{ steps.simulator.outputs.udid }}
+        run: |
+          mkdir -p build/ui-diagnostics
+          xcodebuild -version > build/ui-diagnostics/xcode-version.log 2>&1 || true
+          xcrun simctl list --json > build/ui-diagnostics/simulator-final-state.json 2>&1 || true
+          if [ -n "$SELECTED_SIMULATOR" ]; then
+            xcrun simctl io "$SELECTED_SIMULATOR" screenshot build/ui-diagnostics/simulator-final.png || true
+            xcrun simctl spawn "$SELECTED_SIMULATOR" log show --last 10m --style compact \
+              --predicate 'process == "DaylightIOS" OR process CONTAINS "DaylightUITests"' \
+              > build/ui-diagnostics/simulator-app.log 2>&1 || true
+          fi
+
+      - name: Preserve validation results and diagnostics
+        id: artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: daylight-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/validation/
+            build/TestResults/DaylightUITests.xcresult
+            build/UITests/Logs/Test/
+            build/ui-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summarize automated checks and manual watchOS requirements
+        if: ${{ always() }}
+        env:
+          SHAREDCORE_OUTCOME: ${{ steps.sharedcore.outcome }}
+          FIXTURES_OUTCOME: ${{ steps.fixtures.outcome }}
+          GENERATE_OUTCOME: ${{ steps.generate.outcome }}
+          INTEGRATION_OUTCOME: ${{ steps.integration.outcome }}
+          IOS_DEBUG_OUTCOME: ${{ steps.ios_debug.outcome }}
+          IOS_RELEASE_OUTCOME: ${{ steps.ios_release.outcome }}
+          WATCH_DEBUG_OUTCOME: ${{ steps.watch_debug.outcome }}
+          WATCH_RELEASE_OUTCOME: ${{ steps.watch_release.outcome }}
+          SIMULATOR_OUTCOME: ${{ steps.simulator.outcome }}
+          UI_TESTS_OUTCOME: ${{ steps.ui_tests.outcome }}
+          ARTIFACT_OUTCOME: ${{ steps.artifacts.outcome }}
+        run: |
+          {
+            printf '## Native iOS and watchOS validation\n\n'
+            printf 'macOS is the CI host only. Step outcomes below are not manual runtime acceptance.\n\n'
+            printf '| Automated check | Outcome |\n| --- | --- |\n'
+            printf '| SharedCore tests | %s |\n' "$SHAREDCORE_OUTCOME"
+            printf '| YAML / CI fixtures | %s |\n' "$FIXTURES_OUTCOME"
+            printf '| XcodeGen generation | %s |\n' "$GENERATE_OUTCOME"
+            printf '| SharedCore integration / settings | %s |\n' "$INTEGRATION_OUTCOME"
+            printf '| iOS Debug | %s |\n' "$IOS_DEBUG_OUTCOME"
+            printf '| iOS Release | %s |\n' "$IOS_RELEASE_OUTCOME"
+            printf '| watchOS Debug | %s |\n' "$WATCH_DEBUG_OUTCOME"
+            printf '| watchOS Release | %s |\n' "$WATCH_RELEASE_OUTCOME"
+            printf '| iPhone discovery / boot | %s |\n' "$SIMULATOR_OUTCOME"
+            printf '| Existing iOS UI tests | %s |\n' "$UI_TESTS_OUTCOME"
+            printf '| Evidence upload | %s |\n' "$ARTIFACT_OUTCOME"
+            printf '\nSkipped or cancelled checks are not passed checks. A missing eligible runtime fails discovery and leaves UI testing unexecuted.\n'
+            printf '\n**Not automated:** watchOS installation, launch, button interaction, visual/accessibility checks and in-memory relaunch reset.\n'
+            printf '\nA successful watchOS build does not complete those manual acceptance checks. No synchronization or pairing is validated.\n'
+            printf '\nSee docs/PHASE3A5-VALIDATION.md and docs/PHASE3A5.1-WORKFLOW.md for remaining gates.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
