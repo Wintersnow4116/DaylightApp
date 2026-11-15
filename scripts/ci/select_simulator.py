@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from uuid import UUID
 
 
 class SimulatorUnavailable(RuntimeError):
@@ -18,16 +19,103 @@ def version_tuple(value):
     return (parts + (0, 0, 0))[:3]
 
 
+def canonical_id(value):
+    try:
+        return str(UUID(value)).upper()
+    except (ValueError, TypeError, AttributeError):
+        # Xcode also reports opaque physical-device and placeholder identifiers.
+        return value
+
+
+def destination_attributes(line):
+    row = re.fullmatch(r"\s*\{(.*)\}\s*", line)
+    if not row:
+        raise SimulatorUnavailable("Malformed Xcode destination row; inspect destinations.log.")
+    remaining = row.group(1).strip()
+    attributes = {}
+    while remaining:
+        field = re.match(r"(platform|arch|variant|id|OS|name|error):\s*", remaining)
+        if not field or field.group(1) in attributes:
+            raise SimulatorUnavailable("Unknown or duplicate destination attribute; inspect destinations.log.")
+        key = field.group(1)
+        remaining = remaining[field.end():]
+        # Xcode does not escape free-text names/errors. Never reinterpret their
+        # contents as attributes, even if they contain commas, braces or 'id:'.
+        if key in {"name", "error"}:
+            attributes[key] = remaining
+            break
+        depth = 0
+        boundary = len(remaining)
+        for index, character in enumerate(remaining):
+            if character == "[":
+                depth += 1
+            elif character == "]":
+                depth -= 1
+            elif character == "," and depth == 0:
+                boundary = index
+                break
+            if depth < 0:
+                break
+        if depth != 0:
+            raise SimulatorUnavailable("Malformed destination attribute brackets; inspect destinations.log.")
+        attributes[key] = remaining[:boundary].strip()
+        remaining = remaining[boundary + 1:].strip()
+    if not attributes.get("platform") or not attributes.get("id"):
+        raise SimulatorUnavailable("Missing destination platform/id; inspect destinations.log.")
+    return attributes
+
+
 def eligible_ids(destinations):
-    # Ineligible entries can contain valid UDIDs too; exclude that entire section.
-    available = destinations.split("Available destinations for", 1)
-    if len(available) != 2:
-        return set()
-    section = available[1].split("Ineligible destinations", 1)[0]
-    return set(re.findall(r"\bid:\s*([0-9A-Fa-f-]{36})(?=[,\s}])", section))
+    pairs = {
+        "Available destinations for": "Ineligible destinations for",
+        "Destinations compatible with": "Destinations incompatible with",
+    }
+    header = re.compile(
+        r"^[ \t]*(Available destinations for|Ineligible destinations for|"
+        r"Destinations compatible with|Destinations incompatible with)"
+        r'[ \t]+(?:the "([^"\r\n]+)" scheme|the scheme):[ \t]*\r?$', re.MULTILINE)
+    sections = list(header.finditer(destinations))
+    if (not sections or sections[0].group(1) not in pairs
+            or len(sections) > 2
+            or (len(sections) == 2
+                and (sections[1].group(1) != pairs[sections[0].group(1)]
+                     or sections[1].group(2) != sections[0].group(2)))):
+        raise SimulatorUnavailable(
+            "Unknown or ambiguous Xcode destination sections; inspect destinations.log.")
+
+    end = sections[1].start() if len(sections) == 2 else len(destinations)
+    available = destinations[sections[0].end():end]
+    # A new/unrecognized header must not make later rows look compatible.
+    if any(line.strip() and not re.fullmatch(r"\s*\{.*\}\s*", line)
+           for line in available.splitlines()):
+        raise SimulatorUnavailable(
+            "Malformed Xcode compatible destination section; inspect destinations.log.")
+
+    def section_ids(section, compatible_only):
+        ids = set()
+        for line in section.splitlines():
+            if not line.strip():
+                continue
+            attributes = destination_attributes(line)
+            raw_id = attributes["id"]
+            if attributes["platform"] == "iOS Simulator":
+                if raw_id == "dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder":
+                    continue
+                if not re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", raw_id):
+                    raise SimulatorUnavailable("Malformed simulator UUID; inspect destinations.log.")
+                ids.add(canonical_id(raw_id))
+            elif not compatible_only:
+                ids.add(canonical_id(raw_id))
+        return ids
+
+    eligible = section_ids(available, compatible_only=True)
+    # Exclusion wins even if a contradictory row repeats a compatible UDID.
+    incompatible = destinations[sections[1].end():] if len(sections) == 2 else ""
+    return eligible - section_ids(incompatible, compatible_only=False)
 
 
 def select_device(runtimes, devices, eligible, minimum):
+    eligible = {canonical_id(identifier) for identifier in eligible}
     compatible = {
         runtime["identifier"]: runtime
         for runtime in runtimes["runtimes"]
@@ -48,7 +136,7 @@ def select_device(runtimes, devices, eligible, minimum):
             if (device.get("isAvailable") is True
                     and device.get("deviceTypeIdentifier", "").startswith(
                         "com.apple.CoreSimulator.SimDeviceType.iPhone-")
-                    and device.get("udid") in eligible):
+                    and canonical_id(device.get("udid")) in eligible):
                 candidates.append((compatible[runtime_id], device))
     if not candidates:
         raise SimulatorUnavailable(
@@ -57,7 +145,7 @@ def select_device(runtimes, devices, eligible, minimum):
         )
     # Deterministic choice: newest eligible OS, then an already booted device, then UDID.
     return sorted(candidates, key=lambda item: (
-        version_tuple(item[0]["version"]), item[1].get("state") == "Booted", item[1]["udid"]
+        version_tuple(item[0]["version"]), item[1].get("state") == "Booted", canonical_id(item[1]["udid"])
     ), reverse=True)[0]
 
 

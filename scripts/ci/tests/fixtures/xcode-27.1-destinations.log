@@ -1,0 +1,61 @@
+Command line invocation:
+    /Applications/Xcode_27.1.app/Contents/Developer/usr/bin/xcodebuild -showdestinations -project DaylightApp.xcodeproj -scheme DaylightUITests -configuration UITesting -derivedDataPath build/UITests CODE_SIGNING_ALLOWED=NO
+
+Build settings from command line:
+    CODE_SIGNING_ALLOWED = NO
+
+Resolve Package Graph
+
+
+Resolved source packages:
+  DaylightCore: /Users/runner/work/DaylightApp/DaylightApp/SharedCore
+
+
+
+	Destinations compatible with the "DaylightUITests" scheme:
+		{ platform:macOS, arch:arm64, variant:Designed for [iPad,iPhone], id:d52be5df64af2f29f2e7387f333f10ab876199d9, name:My Mac }
+		{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device }
+		{ platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }
+		{ platform:visionOS Simulator, arch:arm64, variant:Designed for [iPad,iPhone], id:D5A34E37-AA68-44E2-89EA-0F9AEA7732E8, OS:27.0, name:Apple Vision Pro }
+		{ platform:visionOS Simulator, arch:arm64, variant:Designed for [iPad,iPhone], id:46E7C796-CFD9-4011-B284-E67F4C519820, OS:27.2, name:Apple Vision Pro }
+		{ platform:iOS Simulator, arch:arm64, id:5D837EC4-DFCA-462C-9CBD-997BFF1A2E68, OS:27.0, name:iPad (A16) }
+		{ platform:iOS Simulator, arch:arm64, id:1606AE1D-D9DA-4E44-A5D2-FD7DDE1C8DE0, OS:27.2, name:iPad (A16) }
+		{ platform:iOS Simulator, arch:arm64, id:ABFA6AF8-EFEF-4CD6-8453-AEAB10014F8F, OS:27.0, name:iPad Air 11-inch (M4) }
+		{ platform:iOS Simulator, arch:arm64, id:E3CC0D75-9911-40E7-8F16-FD5D98ADF2CA, OS:27.2, name:iPad Air 11-inch (M4) }
+		{ platform:iOS Simulator, arch:arm64, id:0F13E1BE-0D17-4557-B1DB-47542A309DB6, OS:27.0, name:iPad Air 13-inch (M4) }
+		{ platform:iOS Simulator, arch:arm64, id:9BD82FC8-9E98-42CA-B1F2-620B52BA9646, OS:27.2, name:iPad Air 13-inch (M4) }
+		{ platform:iOS Simulator, arch:arm64, id:FFC11C89-1A17-4EBB-B986-ADE2E09FA1AF, OS:27.0, name:iPad Pro 11-inch (M5) }
+		{ platform:iOS Simulator, arch:arm64, id:6582E97C-8AA0-4F7B-8337-A78B20700767, OS:27.2, name:iPad Pro 11-inch (M5) }
+		{ platform:iOS Simulator, arch:arm64, id:E247944A-EF3A-4ACA-99BF-97F59D694F71, OS:27.0, name:iPad Pro 13-inch (M5) }
+		{ platform:iOS Simulator, arch:arm64, id:D03256B1-4569-435F-8D92-E2BDD4ED7058, OS:27.2, name:iPad Pro 13-inch (M5) }
+		{ platform:iOS Simulator, arch:arm64, id:8721CBAE-E1E6-4BFA-A804-29B2DB933F58, OS:27.0, name:iPad mini (A17 Pro) }
+		{ platform:iOS Simulator, arch:arm64, id:4DF1AA75-A2F8-4E1A-AF15-154F8671CBBC, OS:27.2, name:iPad mini (A20 Pro) }
+		{ platform:iOS Simulator, arch:arm64, id:24E299B4-C77B-4426-AC2B-71243825F07C, OS:27.0, name:iPhone 17 }
+		{ platform:iOS Simulator, arch:arm64, id:4AD2086B-7B8F-4608-A742-AA422A0B8D74, OS:27.2, name:iPhone 17 }
+		{ platform:iOS Simulator, arch:arm64, id:0AC25E88-57C5-486B-A20F-84D7A683A99D, OS:27.0, name:iPhone 17e }
+		{ platform:iOS Simulator, arch:arm64, id:CD90C719-F4A8-40D6-9AC3-51BE522C2705, OS:27.2, name:iPhone 17e }
+		{ platform:iOS Simulator, arch:arm64, id:0A1B5EC5-2485-4F8E-B06B-1185D8E186C0, OS:27.0, name:iPhone 18 Pro }
+		{ platform:iOS Simulator, arch:arm64, id:A8CE73D2-F54C-4FB2-B688-BC6BD7612FA8, OS:27.2, name:iPhone 18 Pro }
+		{ platform:iOS Simulator, arch:arm64, id:0893739A-31DF-4ADD-AAD3-12D877638876, OS:27.0, name:iPhone 18 Pro Max }
+		{ platform:iOS Simulator, arch:arm64, id:CAD4F983-CE4C-41E7-84A5-DFFD6F0CF3CA, OS:27.2, name:iPhone 18 Pro Max }
+		{ platform:iOS Simulator, arch:arm64, id:560C2889-F06A-4CE6-B330-A73499F3C513, OS:27.0, name:iPhone Air }
+		{ platform:iOS Simulator, arch:arm64, id:92FA1CA9-EA61-434B-AACA-0A76FE5ECBD4, OS:27.2, name:iPhone Air }
+		{ platform:iOS Simulator, arch:arm64, id:09693AE6-5842-4CF5-B801-D905E896271E, OS:27.1, name:iPhone Duo }
+		{ platform:iOS Simulator, arch:arm64, id:C898E3E4-5033-4085-B886-963EE2D0C478, OS:27.2, name:iPhone Duo }
+
+	Destinations incompatible with the "DaylightUITests" scheme:
+		{ platform:macOS, arch:arm64e, id:d52be5df64af2f29f2e7387f333f10ab876199d9, name:My Mac, error:My Mac’s macOS platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support My Mac. }
+		{ platform:tvOS Simulator, arch:arm64, id:1BB7D6F3-8BE1-4FC9-A260-78467B0D5424, OS:27.2, name:Apple TV 4K (4th generation), error:Apple TV 4K (4th generation)’s tvOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple TV 4K (4th generation). }
+		{ platform:tvOS Simulator, arch:arm64, id:29506C56-3058-4DCF-9859-3AC5460DFA1B, OS:27.2, name:Apple TV 4K (4th generation) (at 1080p), error:Apple TV 4K (4th generation) (at 1080p)’s tvOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple TV 4K (4th generation) (at 1080p). }
+		{ platform:visionOS Simulator, arch:arm64, id:D5A34E37-AA68-44E2-89EA-0F9AEA7732E8, OS:27.0, name:Apple Vision Pro, error:Apple Vision Pro’s visionOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Vision Pro. }
+		{ platform:visionOS Simulator, arch:arm64, id:46E7C796-CFD9-4011-B284-E67F4C519820, OS:27.2, name:Apple Vision Pro, error:Apple Vision Pro’s visionOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Vision Pro. }
+		{ platform:watchOS Simulator, arch:arm64, id:59D98431-6DC6-4BA6-90DE-5EA5F59715D1, OS:27.0, name:Apple Watch SE 3 (40mm), error:Apple Watch SE 3 (40mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch SE 3 (40mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:BFA70E89-86B8-4230-BC4A-C77A3375A583, OS:27.2, name:Apple Watch SE 3 (40mm), error:Apple Watch SE 3 (40mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch SE 3 (40mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:9DC4C83D-BC52-420A-AAA0-35DBBCE62ECA, OS:27.0, name:Apple Watch SE 3 (44mm), error:Apple Watch SE 3 (44mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch SE 3 (44mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:4C0B5A3D-6D96-41B3-A8CB-5DB4A281C3A0, OS:27.2, name:Apple Watch SE 3 (44mm), error:Apple Watch SE 3 (44mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch SE 3 (44mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:0F2F315B-5869-49D4-A5C9-42A5585869D7, OS:27.0, name:Apple Watch Series 12 (42mm), error:Apple Watch Series 12 (42mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Series 12 (42mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:8836D111-0F55-471F-BF96-949729D6E6D4, OS:27.2, name:Apple Watch Series 12 (42mm), error:Apple Watch Series 12 (42mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Series 12 (42mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:CD8A490F-5B2C-485E-8F11-CD8596FA4AAE, OS:27.0, name:Apple Watch Series 12 (46mm), error:Apple Watch Series 12 (46mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Series 12 (46mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:BB504ECE-7BB3-43DB-A862-11699B1BC8B5, OS:27.2, name:Apple Watch Series 12 (46mm), error:Apple Watch Series 12 (46mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Series 12 (46mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:BCB3C139-0F79-47D8-BCF2-5D39AA0D1C00, OS:27.0, name:Apple Watch Ultra 4 (49mm), error:Apple Watch Ultra 4 (49mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Ultra 4 (49mm). }
+		{ platform:watchOS Simulator, arch:arm64, id:6BC93D36-0F39-4B2D-991D-DE2ECF09D68B, OS:27.2, name:Apple Watch Ultra 4 (49mm), error:Apple Watch Ultra 4 (49mm)’s watchOS Simulator platform doesn’t match DaylightIOS.app’s supported platforms. You can change DaylightIOS.app’s Base SDK or Supported Platforms to support Apple Watch Ultra 4 (49mm). }
