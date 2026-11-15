@@ -1,5 +1,27 @@
 # DaylightApp
 
+## Supported product scope
+
+Daylight is an Apple-platform-only native application supporting **iOS and watchOS**.
+SharedCore remains the shared Swift package for business logic and data models.
+Minimum deployment targets remain iOS 17 and watchOS 10; the existing application
+architecture is unchanged.
+
+Shipping Android, web or additional desktop applications, cross-platform application
+frameworks, and unrelated platform deployment pipelines are outside the product scope.
+`prototypes/daylight-web/` is an **active design and interaction reference** maintained
+by a parallel task, not a plan to ship a web product. Preserve its source, Git tracking
+and development setup. See [collaboration boundaries](docs/COLLABORATION-BOUNDARIES.md).
+Windows is a development host and macOS is an Xcode validation host, not application targets.
+
+The current validation scope and remaining iOS/watchOS checks are defined in the
+[Phase 3A.4 validation plan](docs/PHASE3A4-VALIDATION.md).
+The execution phase is [Phase 3A.5 — Final iOS & watchOS Validation](docs/PHASE3A5-VALIDATION.md).
+Xcode builds and simulator tests run on GitHub Actions macOS runners. macOS is only
+the build/testing host; no macOS application, target, interface or distribution is planned.
+For the four simulator build checks, iOS UI tests, retained evidence and manual GitHub
+trigger instructions, see [Phase 3A.5.1 workflow](docs/PHASE3A5.1-WORKFLOW.md).
+
 原生 SwiftUI iOS + watchOS 应用，共享现有的 `SharedCore` 本地 Swift Package。
 Phase 3A 提供 iPhone 上的计时、持久化记录、最近 7 天历史与每日目标设置。
 
@@ -79,3 +101,11 @@ Windows 的包测试和配置静态检查不能证明 SwiftUI 已通过 Xcode �
 未执行 push；未声称已完成本阶段的 Xcode 构建、Simulator 启动、界面实机、配对或同步验证。
 
 详细数据规则、计时失败行为及手动验收步骤见 [Phase 3A 说明](docs/PHASE3A.md)。
+
+Phase 3A.1 新增独立的 `DaylightUITests` XCTest UI 测试 target 和 `UITesting` 配置，
+CI 会动态发现并启动已安装、兼容的 iPhone Simulator，验证页面导航、开始/结束、历史记录与重启恢复。
+测试使用单独的 App Bundle ID 和每个测试独有的文件目录，保留正常校验和持久化流程。
+本次尚未执行新的 macOS 构建或 UI 测试，详情见 [Phase 3A.1 说明](docs/PHASE3A1.md)。
+
+Phase 3A.2 的问题、修复和验证边界见 [预发布审计报告](docs/PHASE3A2-AUDIT.md)。
+本地 SharedCore 现有 36 个测试通过，CI 脚本的 9 个夹具测试通过；实际 Xcode/UI 验证仍待运行。
