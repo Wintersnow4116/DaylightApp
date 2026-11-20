@@ -38,7 +38,10 @@ def output(scheme, identifier=A, legacy=False):
 
 def settings():
     return [{"target": name, "buildSettings": {
-        "TEST_TARGET_NAME": "DaylightWatch", "PLATFORM_NAME": "watchsimulator",
+        "TARGET_NAME": name,
+        "PRODUCT_TYPE": "com.apple.product-type.application" if name == "DaylightWatch" else "com.apple.product-type.bundle.ui-testing",
+        **({"TEST_TARGET_NAME": "DaylightWatch"} if name == "DaylightWatchUITests" else {}),
+        "PLATFORM_NAME": "watchsimulator",
         "SDKROOT": "watchsimulator27.0", "WATCHOS_DEPLOYMENT_TARGET": "10.0"}}
         for name in ("DaylightWatch", "DaylightWatchUITests")]
 
@@ -53,7 +56,8 @@ class WatchProbeTests(unittest.TestCase):
                 "schemes": {"project": {"schemes": ["DaylightWatch", "DaylightWatchUITests"]}},
                 "DaylightWatch-destinations": output("DaylightWatch"),
                 "DaylightWatchUITests-destinations": output("DaylightWatchUITests"),
-                "settings-" + A: settings()}
+                "settings-" + A: [settings()[0]],
+                "watch-test-target-settings": [settings()[1]]}
 
     def run_probe(self, overrides=None):
         responses = self.responses()
@@ -67,6 +71,9 @@ class WatchProbeTests(unittest.TestCase):
                     ("xcrun", "simctl", "list", "runtimes", "--json"): "runtimes",
                     ("xcrun", "simctl", "list", "devices", "--json"): "devices",
                     tuple(base + ["-list", "-json"]): "schemes"}
+        commands[tuple(base + ["-target", "DaylightWatchUITests", "-configuration", "Debug",
+                              "-sdk", "watchsimulator", "-showBuildSettings", "-json",
+                              "CODE_SIGNING_ALLOWED=NO"])] = "watch-test-target-settings"
         for operation in ("list", "bootstatus", "install", "launch", "spawn", "io", "terminate", "get_app_container"):
             name = "simctl-help-" + operation
             commands[("xcrun", "simctl", "help", operation)] = name
@@ -133,7 +140,7 @@ class WatchProbeTests(unittest.TestCase):
 
     def test_all_common_devices_are_inspected_without_selection(self):
         additions = {"devices": {"devices": {RUNTIME: [device(), device(B)]}},
-                     "settings-" + B: settings()}
+                     "settings-" + B: [settings()[0]]}
         for scheme in ("DaylightWatch", "DaylightWatchUITests"):
             additions[scheme + "-destinations"] = (
                 f'Destinations compatible with the "{scheme}" scheme:\r\n'
@@ -143,7 +150,7 @@ class WatchProbeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["common_eligible_watch_udids"], [A, B])
         self.assertEqual(set(report["configuration"]), {A, B})
-        self.assertEqual(sum("-showBuildSettings" in call for call in calls), 2)
+        self.assertEqual(sum("-showBuildSettings" in call for call in calls), 3)
 
     def test_missing_scheme_fails_even_when_destination_query_succeeds(self):
         code, report, _, _ = self.run_probe({"schemes": {"project": {"schemes": ["DaylightWatch"]}}})
@@ -208,7 +215,7 @@ class WatchProbeTests(unittest.TestCase):
                            ("TEST_TARGET_NAME", "OtherApp"), ("WATCHOS_DEPLOYMENT_TARGET", "9.0")):
             invalid = settings()
             invalid[1]["buildSettings"][key] = value
-            self.assertEqual(self.run_probe({"settings-" + A: invalid})[0], 1)
+            self.assertEqual(self.run_probe({"watch-test-target-settings": [invalid[1]]})[0], 1)
 
     def test_existing_evidence_directory_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -359,13 +366,86 @@ class WatchProbeTests(unittest.TestCase):
                                 for i in report["issues"]))
 
     def test_json_commands_never_parse_stderr_as_stdout(self):
-        for name in ("runtimes", "devices", "schemes", "settings-" + A):
+        for name in ("runtimes", "devices", "schemes", "settings-" + A, "watch-test-target-settings"):
             raw = json.dumps(self.responses()[name]).encode()
             code, report, files, _ = self.run_probe({name: subprocess.CompletedProcess([], 0, b"", raw)})
             self.assertEqual(code, 1)
             self.assertEqual(report["status"], "not_established")
             self.assertEqual(files[name + ".stdout.log"], b"")
             self.assertEqual(files[name + ".stderr.log"], raw)
+
+    def test_application_only_scheme_response_and_independent_test_target_succeed(self):
+        code, report, files, calls = self.run_probe()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(files["settings-" + A + ".stdout.log"]), [settings()[0]])
+        self.assertEqual(json.loads(files["watch-test-target-settings.stdout.log"]), [settings()[1]])
+        self.assertTrue(report["test_target_configuration"]["verified"])
+        self.assertTrue(report["configuration"][A]["verified"])
+        target_calls = [c for c in calls if "-target" in c]
+        self.assertEqual(len(target_calls), 1)
+        self.assertEqual(target_calls[0][target_calls[0].index("-target") + 1], "DaylightWatchUITests")
+        self.assertNotIn("-scheme", target_calls[0])
+        self.assertNotIn("-destination", target_calls[0])
+
+    def test_captured_application_sdk_path_format_is_accepted(self):
+        # Path format observed in run 44695148451; this response is synthetic.
+        app = settings()[0]
+        app["buildSettings"]["SDKROOT"] = (
+            "/Applications/Xcode_27.1.app/Contents/Developer/Platforms/WatchSimulator.platform/"
+            "Developer/SDKs/WatchSimulator27.0.sdk")
+        self.assertNotIn("TEST_TARGET_NAME", app["buildSettings"])
+        code, report, _, _ = self.run_probe({"settings-" + A: [app]})
+        self.assertEqual(code, 0)
+        self.assertTrue(report["configuration"][A]["verified"])
+
+    def test_missing_malformed_duplicate_or_unexpected_target_responses_fail(self):
+        for name, normal in (("settings-" + A, settings()[0]),
+                             ("watch-test-target-settings", settings()[1])):
+            for value in ([], {}, "not JSON", [normal, normal],
+                          [dict(normal, target="UnexpectedTarget")],
+                          [dict(normal, buildSettings={})], [settings()[0], settings()[1]]):
+                with self.subTest(command=name, response=value):
+                    code, report, files, _ = self.run_probe({name: value})
+                    self.assertEqual(code, 1)
+                    self.assertEqual(report["status"], "not_established")
+                    self.assertFalse(report["configuration"][A]["verified"])
+                    self.assertIn(name + ".stdout.log", files)
+
+    def test_each_target_requires_consistent_identity_sdk_platform_and_deployment(self):
+        for name, normal in (("settings-" + A, settings()[0]),
+                             ("watch-test-target-settings", settings()[1])):
+            for key, value in (("TARGET_NAME", "WrongTarget"), ("PLATFORM_NAME", "watchos"),
+                               ("SDKROOT", "iphoneos27.0"), ("SDKROOT", "notwatchsimulator27.0"),
+                               ("WATCHOS_DEPLOYMENT_TARGET", "9.0"),
+                               ("WATCHOS_DEPLOYMENT_TARGET", "11.0")):
+                with self.subTest(command=name, setting=key, value=value):
+                    altered = dict(normal, buildSettings=dict(normal["buildSettings"], **{key: value}))
+                    self.assertEqual(self.run_probe({name: [altered]})[0], 1)
+
+    def test_ui_test_product_type_and_host_must_be_explicitly_established(self):
+        for key in ("TEST_TARGET_NAME", "PRODUCT_TYPE"):
+            for missing in (False, True):
+                altered = settings()[1]
+                if missing:
+                    del altered["buildSettings"][key]
+                else:
+                    altered["buildSettings"][key] = "incorrect"
+                code, report, _, _ = self.run_probe({"watch-test-target-settings": [altered]})
+                self.assertEqual(code, 1)
+                self.assertFalse(report["test_target_configuration"]["verified"])
+                self.assertTrue(any(key in i["message"] for i in report["issues"]))
+                if missing:
+                    self.assertTrue(any("was not exposed" in i["message"] for i in report["issues"]))
+
+    def test_target_specific_command_failure_preserves_raw_evidence_and_exit_code(self):
+        code, report, files, _ = self.run_probe({"watch-test-target-settings":
+            subprocess.CompletedProcess([], 65, b"partial stdout\r\n", b"target failed\r\n")})
+        self.assertEqual(code, 1)
+        self.assertEqual(report["commands"]["watch-test-target-settings"]["returncode"], 65)
+        self.assertEqual(report["commands"]["watch-test-target-settings"]["status"], "command_failed")
+        self.assertEqual(files["watch-test-target-settings.stdout.log"], b"partial stdout\r\n")
+        self.assertEqual(files["watch-test-target-settings.stderr.log"], b"target failed\r\n")
+        self.assertFalse(report["configuration"][A]["verified"])
 
 
 if __name__ == "__main__":

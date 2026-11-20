@@ -154,6 +154,32 @@ def inventory(runtimes, devices):
             "available_watch_udids": sorted(available)}
 
 
+def resolved_settings(response, target):
+    """Validate one explicit target response, never infer settings from another."""
+    if (not isinstance(response, list) or len(response) != 1
+            or not isinstance(response[0], dict) or response[0].get("target") != target
+            or not isinstance(response[0].get("buildSettings"), dict)):
+        raise EvidenceError("Missing, duplicated or unexpected settings target: " + target)
+    settings = response[0]["buildSettings"]
+    expected = {"TARGET_NAME": target, "PLATFORM_NAME": "watchsimulator",
+                "WATCHOS_DEPLOYMENT_TARGET": "10.0"}
+    if target == SCHEMES[1]:
+        expected.update(TEST_TARGET_NAME=SCHEMES[0],
+                        PRODUCT_TYPE="com.apple.product-type.bundle.ui-testing")
+    for key, value in expected.items():
+        if key not in settings:
+            raise EvidenceError(f"{target}: required setting {key} was not exposed")
+        if settings[key] != value:
+            raise EvidenceError(f"{target}: contradictory setting {key}")
+    sdk = settings.get("SDKROOT")
+    if not isinstance(sdk, str) or not re.search(
+            r"(?:^|/)watchsimulator(?:[0-9]+(?:\.[0-9]+)*)?(?:\.sdk)?$", sdk, re.IGNORECASE):
+        raise EvidenceError(target + ": missing or invalid Watch Simulator SDKROOT")
+    if target == SCHEMES[0] and settings.get("PRODUCT_TYPE", "com.apple.product-type.application") != "com.apple.product-type.application":
+        raise EvidenceError(target + ": unexpected application product type")
+    return settings
+
+
 class Probe:
     def __init__(self, output, project, runner=subprocess.run):
         self.output = Path(output)
@@ -279,27 +305,36 @@ class Probe:
         self.report["common_eligible_watch_udids"] = common
         if not common:
             self.issue("missing_infrastructure", "No Watch UDID is available and compatible with both schemes")
+        test_settings = None
+        if common:
+            # Scheme build-action settings can omit the UI-test target. Query
+            # that target explicitly with its simulator SDK, without combining
+            # -target with -scheme or claiming device-specific test resolution.
+            response = self.command("watch-test-target-settings", base + [
+                "-target", SCHEMES[1], "-configuration", "Debug", "-sdk", "watchsimulator",
+                "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO"], True)
+            self.report["test_target_configuration"] = {
+                "command": "watch-test-target-settings", "scope": "target-level simulator SDK settings",
+                "verified": False}
+            try:
+                test_settings = resolved_settings(response, SCHEMES[1])
+                self.report["test_target_configuration"].update(settings=test_settings, verified=True)
+            except EvidenceError as error:
+                self.issue("missing_configuration", str(error))
         # Inspect every common destination; never choose or boot a device.
         for identifier in common:
             settings = self.command("settings-" + identifier, base + ["-scheme", SCHEMES[1],
                 "-configuration", "Debug", "-sdk", "watchsimulator", "-destination",
                 "platform=watchOS Simulator,id=" + identifier, "-showBuildSettings", "-json",
                 "CODE_SIGNING_ALLOWED=NO"], True)
-            valid = False
-            if (isinstance(settings, list)
-                    and all(isinstance(s, dict) and isinstance(s.get("target"), str)
-                            and isinstance(s.get("buildSettings"), dict) for s in settings)
-                    and len({s["target"] for s in settings}) == len(settings)):
-                targets = {s.get("target"): s.get("buildSettings", {}) for s in settings if isinstance(s, dict)}
-                app, test = targets.get(SCHEMES[0], {}), targets.get(SCHEMES[1], {})
-                valid = (test.get("TEST_TARGET_NAME") == SCHEMES[0]
-                         and all(s.get("PLATFORM_NAME") == "watchsimulator"
-                                 and str(s.get("SDKROOT", "")).lower().find("watchsimulator") >= 0
-                                 and s.get("WATCHOS_DEPLOYMENT_TARGET") == "10.0"
-                                 for s in (app, test)))
-                self.report["configuration"][identifier] = {"targets": targets, "verified": valid}
-            if not valid:
-                self.issue("missing_configuration", "Watch test settings not established for " + identifier)
+            evidence = {"application_command": "settings-" + identifier,
+                        "test_target_command": "watch-test-target-settings", "verified": False}
+            self.report["configuration"][identifier] = evidence
+            try:
+                evidence["application_settings"] = resolved_settings(settings, SCHEMES[0])
+                evidence["verified"] = test_settings is not None
+            except EvidenceError as error:
+                self.issue("missing_configuration", identifier + ": " + str(error))
 
 
 def main():
