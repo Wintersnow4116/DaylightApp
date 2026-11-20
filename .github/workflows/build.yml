@@ -262,3 +262,58 @@ jobs:
             printf '\nA successful watchOS build does not complete those manual acceptance checks. No synchronization or pairing is validated.\n'
             printf '\nSee docs/PHASE3A5-VALIDATION.md and docs/PHASE3A5.1-WORKFLOW.md for remaining gates.\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  watch_probe:
+    name: Watch Simulator capability probe (diagnostic only)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare Watch probe prerequisites
+        run: |
+          set -euo pipefail
+          mkdir -p build/watch-probe-setup
+          # Refuse stale evidence; the probe creates its own new directory.
+          test ! -e build/watch-probe
+          test -f DaylightWatchUITests/DaylightWatchUITests.swift
+
+      - name: Install XcodeGen for Watch probe
+        run: |
+          set -euo pipefail
+          mkdir -p build/watch-probe-setup
+          if ! command -v xcodegen > /dev/null 2>&1; then
+            brew install xcodegen 2>&1 | tee build/watch-probe-setup/xcodegen-install.log
+          fi
+          xcodegen --version | tee build/watch-probe-setup/xcodegen-version.log
+
+      - name: Generate project for Watch probe
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml 2>&1 | tee build/watch-probe-setup/xcodegen.log
+
+      - name: Probe Watch Simulator capabilities
+        id: watch_capabilities
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/probe_watch_simulator.py --project DaylightApp.xcodeproj --output build/watch-probe
+
+      - name: Preserve Watch probe diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: daylight-watch-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/watch-probe/
+            build/watch-probe-setup/
+          if-no-files-found: warn
+          retention-days: 7

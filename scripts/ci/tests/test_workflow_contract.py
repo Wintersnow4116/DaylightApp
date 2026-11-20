@@ -1,8 +1,11 @@
 """Source-level workflow guards and shell parsing; not a substitute for YAML parsing."""
 
 from pathlib import Path
+import hashlib
+import re
 import shutil
 import subprocess
+import tempfile
 import textwrap
 import unittest
 
@@ -74,6 +77,107 @@ class WorkflowContractTests(unittest.TestCase):
                 result = subprocess.run([bash, "-n"], input=block, text=True,
                                         capture_output=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def watch_job(self):
+        source = self.source()
+        self.assertEqual(source.count("\n  watch_probe:\n"), 1)
+        return source.split("\n  watch_probe:\n", 1)[1]
+
+    def test_existing_validation_job_is_unchanged(self):
+        # Fingerprint of the complete approved workflow before adding the
+        # independent diagnostic job, including every existing build/test command.
+        original = self.source().split("\n  watch_probe:\n", 1)[0].rstrip()
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         "0e1931cdd3d0d7a89e0af2e1db3e035f7e209c9897be2c0f5091e625e147e278")
+
+    def test_watch_probe_is_independent_and_uses_established_toolchain(self):
+        job = self.watch_job()
+        header = job.split("    steps:", 1)[0]
+        self.assertIn("runs-on: xcode-27", header)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer", header)
+        self.assertRegex(header, r"timeout-minutes: [1-9][0-9]*")
+        self.assertNotRegex(header, r"(?m)^\s*(needs|if):")
+        self.assertNotIn("steps.ui_tests", job)
+        self.assertNotIn("needs.", job)
+        self.assertIn("uses: actions/checkout@v7", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn("if ! command -v xcodegen > /dev/null 2>&1; then\n            brew install xcodegen", job)
+
+    def test_watch_probe_generation_order_arguments_and_failure_propagation(self):
+        job = self.watch_job()
+        blocks = run_blocks(job)
+        self.assertEqual(len(blocks), 4)
+        self.assertIn("test ! -e build/watch-probe", blocks[0])
+        self.assertIn("test -f DaylightWatchUITests/DaylightWatchUITests.swift", blocks[0])
+        self.assertIn("xcodegen generate --spec project.yml", blocks[2])
+        self.assertEqual(blocks[3].strip(),
+            "set -euo pipefail\npython3 scripts/ci/probe_watch_simulator.py "
+            "--project DaylightApp.xcodeproj --output build/watch-probe")
+        self.assertNotIn("continue-on-error", job)
+        for step in re.split(r"(?m)^      - name: ", job)[1:]:
+            if not step.startswith("Preserve Watch probe diagnostics"):
+                self.assertNotRegex(step, r"(?m)^\s*if:")
+        for block in blocks:
+            self.assertNotIn("|| true", block)
+            self.assertTrue(block.startswith("set -euo pipefail"))
+            self.assertNotRegex(block, r"simctl|xcodebuild|select_simulator|download|erase|delete")
+            self.assertNotIn("mkdir -p build/watch-probe\n", block)
+
+    def test_watch_probe_artifacts_survive_failure_and_are_separate(self):
+        job = self.watch_job()
+        artifact = job.split("- name: Preserve Watch probe diagnostics\n", 1)[1]
+        self.assertIn("if: ${{ always() }}", artifact)
+        self.assertIn("uses: actions/upload-artifact@v7", artifact)
+        self.assertIn("name: daylight-watch-probe-${{ github.run_id }}-${{ github.run_attempt }}", artifact)
+        self.assertIn("build/watch-probe/", artifact)
+        self.assertIn("build/watch-probe-setup/", artifact)
+        self.assertNotIn("daylight-validation-", artifact)
+        self.assertGreater(job.index("- name: Preserve Watch probe diagnostics"),
+                           job.index("- name: Probe Watch Simulator capabilities"))
+
+    def test_watch_xcodegen_install_captures_both_streams_and_preserves_failure(self):
+        job = self.watch_job()
+        step = job.split("- name: Install XcodeGen for Watch probe\n", 1)[1].split("      - name:", 1)[0]
+        blocks = run_blocks(step)
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertLess(block.index("mkdir -p build/watch-probe-setup"), block.index("brew install"))
+        self.assertIn("brew install xcodegen 2>&1 | tee build/watch-probe-setup/xcodegen-install.log", block)
+        self.assertIn("set -euo pipefail", block)
+        artifact = job.split("- name: Preserve Watch probe diagnostics\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: ${{ always() }}", artifact)
+        self.assertIn("build/watch-probe-setup/", artifact)
+
+        bash = shutil.which("bash")
+        if not bash:
+            git = shutil.which("git")
+            candidate = Path(git).parent.parent / "bin/bash.exe" if git else None
+            if candidate and candidate.is_file():
+                bash = str(candidate)
+        if not bash:
+            self.skipTest("No installed Bash is available for mocked installation execution")
+        for exit_code in (0, 23):
+            with self.subTest(installation_exit=exit_code), tempfile.TemporaryDirectory() as temporary:
+                # Functions prevent execution of real installers. Force only the
+                # presence check to report missing, then execute the actual step.
+                prelude = '''command() {
+  if [ "$*" = "-v xcodegen" ]; then return 1; fi
+  builtin command "$@"
+}
+brew() {
+  printf 'synthetic install stdout\\n'
+  printf 'synthetic install stderr\\n' >&2
+  return %d
+}
+xcodegen() { printf 'synthetic version reached\\n'; }
+''' % exit_code
+                result = subprocess.run([bash], input=prelude + block, text=True,
+                    cwd=temporary, capture_output=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                setup = Path(temporary) / "build/watch-probe-setup"
+                self.assertEqual((setup / "xcodegen-install.log").read_text(encoding="utf-8"),
+                                 "synthetic install stdout\nsynthetic install stderr\n")
+                self.assertEqual((setup / "xcodegen-version.log").exists(), exit_code == 0)
 
 
 if __name__ == "__main__":
