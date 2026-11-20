@@ -15,6 +15,11 @@ from uuid import UUID
 
 
 SCHEMES = ("DaylightWatch", "DaylightWatchUITests")
+WATCH_PLACEHOLDERS = {
+    "dvtdevice-DVTWatchDeviceSimulatorPlaceholder-watchsimulator:placeholder",
+    # Observed in Xcode 27.1, despite the iOS class name.
+    "dvtdevice-DVTiOSDeviceSimulatorPlaceholder-watchsimulator:placeholder",
+}
 
 
 class EvidenceError(ValueError):
@@ -77,7 +82,7 @@ def destinations(text, scheme):
             item["unavailable"] = ("error" in fields or bool(
                 re.search(r"(?:^|,)\s*error:", fields.get("name", ""))))
             if fields["platform"] == "watchOS Simulator":
-                if fields["id"] != "dvtdevice-DVTWatchDeviceSimulatorPlaceholder-watchsimulator:placeholder":
+                if fields["id"] not in WATCH_PLACEHOLDERS:
                     item["udid"] = uuid(fields["id"])
             result["compatible" if index == 0 else "incompatible"].append(item)
     excluded = {r["udid"] for r in result["incompatible"] if "udid" in r}
@@ -184,6 +189,16 @@ class Probe:
             self.issue(record["status"], name)
             return None
         try:
+            # Only simctl help may supply its evidence on stderr. Validate the
+            # usage line for the requested operation; JSON/destinations retain
+            # strict stdout handling. The original streams above are untouched.
+            if not structured and len(args) == 4 and args[:3] == ["xcrun", "simctl", "help"]:
+                usage = r"(?m)^Usage:\s+simctl\s+" + re.escape(args[3]) + r"(?:\s|$)"
+                for stream in (stdout, stderr):
+                    help_text = stream.decode("utf-8-sig")
+                    if re.search(usage, help_text):
+                        return help_text
+                raise EvidenceError("Missing or malformed simctl help usage for " + args[3])
             text = stdout.decode("utf-8-sig")
             if not text.strip():
                 raise EvidenceError("Empty command output")

@@ -70,7 +70,7 @@ class WatchProbeTests(unittest.TestCase):
         for operation in ("list", "bootstatus", "install", "launch", "spawn", "io", "terminate", "get_app_container"):
             name = "simctl-help-" + operation
             commands[("xcrun", "simctl", "help", operation)] = name
-            responses.setdefault(name, "Synthetic command help\n")
+            responses.setdefault(name, f"Usage: simctl {operation} <synthetic arguments>\n")
         for scheme in ("DaylightWatch", "DaylightWatchUITests"):
             commands[tuple(base + ["-scheme", scheme, "-configuration", "Debug",
                                   "-showdestinations", "CODE_SIGNING_ALLOWED=NO"])] = scheme + "-destinations"
@@ -298,6 +298,74 @@ class WatchProbeTests(unittest.TestCase):
             self.assertEqual(report["common_eligible_watch_udids"], [])
         self.assertEqual(self.run_probe({"DaylightWatch-destinations":
             'Destinations compatible with the "DaylightWatch" scheme:\n'})[0], 1)
+
+    def test_observed_xcode_placeholder_is_preserved_alongside_real_devices(self):
+        # Exact placeholder row/section syntax observed in run 44691975970;
+        # the remaining device/error rows are synthetic, not captured evidence.
+        row = ('\t\t{ platform:watchOS Simulator, '
+               'id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-watchsimulator:placeholder, '
+               'name:Any watchOS Simulator Device }')
+        overrides = {}
+        for scheme in ("DaylightWatch", "DaylightWatchUITests"):
+            text = output(scheme).replace("\r\n", "\r\n" + row + "\r\n", 1)
+            evidence = destinations(text, scheme)
+            self.assertEqual(evidence["compatible_watch_udids"], [A])
+            self.assertEqual(evidence["compatible"][0]["raw"], row)
+            self.assertNotIn("udid", evidence["compatible"][0])
+            self.assertEqual(evidence["incompatible"][0]["udid"], B)
+            overrides[scheme + "-destinations"] = text
+        code, report, files, _ = self.run_probe(overrides)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["common_eligible_watch_udids"], [A])
+        self.assertEqual(files["DaylightWatch-destinations.stdout.log"],
+                         overrides["DaylightWatch-destinations"].encode())
+        for invalid in ("dvtdevice-UnknownPlaceholder-watchsimulator:placeholder", "not-a-uuid"):
+            with self.assertRaises(EvidenceError):
+                destinations(output("DaylightWatch", invalid), "DaylightWatch")
+
+    def test_observed_placeholder_does_not_bypass_error_or_exclusion_rules(self):
+        placeholder = "dvtdevice-DVTiOSDeviceSimulatorPlaceholder-watchsimulator:placeholder"
+        self.assertEqual(self.run_probe({"DaylightWatch-destinations": output("DaylightWatch", placeholder)})[0], 1)
+        for text in (output("DaylightWatch").replace("name:Synthetic Watch", "error:unavailable"),
+                     output("DaylightWatch").replace("id:" + B, "id:" + A.lower())):
+            text = text.replace("\r\n", f'\r\n {{ platform:watchOS Simulator, id:{placeholder}, name:Any watchOS Simulator Device }}\r\n', 1)
+            self.assertEqual(self.run_probe({"DaylightWatch-destinations": text})[0], 1)
+
+    def test_successful_stderr_only_help_is_valid_and_preserves_both_streams(self):
+        overrides = {}
+        for operation in ("list", "bootstatus", "install", "launch", "spawn", "io", "terminate", "get_app_container"):
+            raw = f"Synthetic description\r\nUsage: simctl {operation} <arguments>\r\n".encode()
+            overrides["simctl-help-" + operation] = subprocess.CompletedProcess([], 0, b"", raw)
+        code, report, files, _ = self.run_probe(overrides)
+        self.assertEqual(code, 0)
+        for name, response in overrides.items():
+            self.assertEqual(report["commands"][name]["status"], "passed")
+            self.assertEqual(files[name + ".stdout.log"], b"")
+            self.assertEqual(files[name + ".stderr.log"], response.stderr)
+
+    def test_empty_malformed_or_failed_help_cannot_establish_capabilities(self):
+        for response in (subprocess.CompletedProcess([], 0, b"", b""),
+                         subprocess.CompletedProcess([], 0, b"", b" \r\n"),
+                         subprocess.CompletedProcess([], 0, b"unrecognized output", b"warning only"),
+                         subprocess.CompletedProcess([], 0, b"", b"Usage: simctl install <device>"),
+                         subprocess.CompletedProcess([], 0, b"", b"\xff"),
+                         subprocess.CompletedProcess([], 1, b"", b"Usage: simctl launch <device>")):
+            code, report, files, _ = self.run_probe({"simctl-help-launch": response})
+            self.assertEqual(code, 1)
+            self.assertEqual(report["status"], "not_established")
+            self.assertEqual(files["simctl-help-launch.stdout.log"], response.stdout)
+            self.assertEqual(files["simctl-help-launch.stderr.log"], response.stderr)
+            self.assertTrue(any(i["category"] == ("command_failed" if response.returncode else "malformed_output")
+                                for i in report["issues"]))
+
+    def test_json_commands_never_parse_stderr_as_stdout(self):
+        for name in ("runtimes", "devices", "schemes", "settings-" + A):
+            raw = json.dumps(self.responses()[name]).encode()
+            code, report, files, _ = self.run_probe({name: subprocess.CompletedProcess([], 0, b"", raw)})
+            self.assertEqual(code, 1)
+            self.assertEqual(report["status"], "not_established")
+            self.assertEqual(files[name + ".stdout.log"], b"")
+            self.assertEqual(files[name + ".stderr.log"], raw)
 
 
 if __name__ == "__main__":
