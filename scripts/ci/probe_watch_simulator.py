@@ -1,0 +1,302 @@
+"""Inspect an already-generated Watch project without changing simulator state.
+
+Commands may populate Xcode's ordinary caches. This probe never generates a
+project, builds, runs tests, boots devices, pairs devices or installs software.
+Raw stdout/stderr bytes are saved before parsing; JSON is configuration evidence,
+never evidence that an application or test actually executed.
+"""
+
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+from uuid import UUID
+
+
+SCHEMES = ("DaylightWatch", "DaylightWatchUITests")
+
+
+class EvidenceError(ValueError):
+    pass
+
+
+def uuid(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value):
+        raise EvidenceError("Invalid simulator UDID")
+    return str(UUID(value)).upper()
+
+
+def destinations(text, scheme):
+    """Conservatively interpret known headers, keeping every raw row and reason."""
+    pairs = {"Available destinations for": "Ineligible destinations for",
+             "Destinations compatible with": "Destinations incompatible with"}
+    pattern = re.compile(
+        r'^\s*(Available destinations for|Ineligible destinations for|'
+        r'Destinations compatible with|Destinations incompatible with) '
+        r'(?:the "([^"\r\n]+)" scheme|the scheme):[ \t]*\r?$', re.MULTILINE)
+    headers = list(pattern.finditer(text))
+    if (not headers or len(headers) > 2 or headers[0][1] not in pairs
+            or any(h[2] not in (None, scheme) for h in headers)
+            or (len(headers) == 2 and
+                (headers[1][1] != pairs[headers[0][1]] or headers[1][2] != headers[0][2]))):
+        raise EvidenceError("Missing, ambiguous or mismatched destination sections")
+    result = {"compatible": [], "incompatible": []}
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        for line in text[header.end():end].splitlines():
+            if not line.strip():
+                continue
+            row = re.fullmatch(r"\s*\{(.*)\}\s*", line)
+            if not row:
+                raise EvidenceError("Malformed destination section")
+            # Free-text name/error consume the tail, so embedded 'id:' is never
+            # interpreted as a structural attribute. Unknown formats fail closed.
+            fields = {}
+            tail = row[1].strip()
+            while tail:
+                match = re.match(r"(platform|arch|variant|id|OS|name|error):\s*", tail)
+                if not match or match[1] in fields:
+                    raise EvidenceError("Unknown or duplicated destination attribute")
+                key = match[1]
+                tail = tail[match.end():]
+                if key in ("name", "error"):
+                    fields[key] = tail
+                    break
+                # Architecture lists can contain commas within brackets.
+                value = re.match(r"(?:\[[^\[\]]*\]|[^,\[\]])*(?:,|$)", tail)
+                if not value or not value[0]:
+                    raise EvidenceError("Malformed destination attributes")
+                fields[key] = value[0].rstrip(",").strip()
+                tail = tail[value.end():].strip()
+            if not fields.get("platform") or not fields.get("id"):
+                raise EvidenceError("Missing destination platform or id")
+            item = {"raw": line, "attributes": fields}
+            # Names/errors are unescaped free text. Treat an error-like tail
+            # conservatively as unavailable; never reinterpret embedded IDs.
+            item["unavailable"] = ("error" in fields or bool(
+                re.search(r"(?:^|,)\s*error:", fields.get("name", ""))))
+            if fields["platform"] == "watchOS Simulator":
+                if fields["id"] != "dvtdevice-DVTWatchDeviceSimulatorPlaceholder-watchsimulator:placeholder":
+                    item["udid"] = uuid(fields["id"])
+            result["compatible" if index == 0 else "incompatible"].append(item)
+    excluded = {r["udid"] for r in result["incompatible"] if "udid" in r}
+    excluded.update(r["udid"] for r in result["compatible"]
+                    if "udid" in r and r["unavailable"])
+    result["compatible_watch_udids"] = sorted(
+        {r["udid"] for r in result["compatible"] if "udid" in r} - excluded)
+    return result
+
+
+def inventory(runtimes, devices):
+    """Collapse identical identities; reject any conflicting duplicate record.
+
+    Equality includes all reported fields and device runtime association. UUID
+    case alone is equivalent. Original inventory bytes remain in command logs.
+    """
+    if not isinstance(runtimes, dict) or not isinstance(devices, dict):
+        raise EvidenceError("Malformed simulator inventory")
+    if not isinstance(runtimes.get("runtimes"), list) or not isinstance(devices.get("devices"), dict):
+        raise EvidenceError("Malformed simulator inventory")
+    watch = []
+    associations = {}
+    seen_runtimes = {}
+    for runtime in runtimes["runtimes"]:
+        if not isinstance(runtime, dict) or not isinstance(runtime.get("identifier"), str):
+            raise EvidenceError("Malformed runtime entry")
+        identifier = runtime["identifier"]
+        if identifier in seen_runtimes:
+            if seen_runtimes[identifier] != runtime:
+                raise EvidenceError("Conflicting duplicate runtime: " + identifier)
+            continue
+        seen_runtimes[identifier] = runtime
+        if runtime["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.watchOS-"):
+            version = runtime.get("version")
+            if not isinstance(version, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", version):
+                raise EvidenceError("Missing or malformed Watch runtime version")
+            watch.append(runtime)
+            associations[runtime["identifier"]] = runtime
+    entries = []
+    available = set()
+    seen_devices = {}
+    for runtime_id, group in devices["devices"].items():
+        if not isinstance(runtime_id, str) or not isinstance(group, list):
+            raise EvidenceError("Malformed device group")
+        for device in group:
+            if not isinstance(device, dict):
+                raise EvidenceError("Malformed Watch device")
+            identifier = uuid(device.get("udid", ""))
+            canonical = dict(device, udid=identifier)
+            identity = {"runtime_identifier": runtime_id, "device": canonical}
+            if identifier in seen_devices:
+                if seen_devices[identifier] != identity:
+                    raise EvidenceError("Conflicting duplicate device: " + identifier)
+                continue
+            seen_devices[identifier] = identity
+            if not runtime_id.startswith("com.apple.CoreSimulator.SimRuntime.watchOS-"):
+                continue
+            if not all(isinstance(device.get(k), str) for k in ("name", "state", "deviceTypeIdentifier")):
+                raise EvidenceError("Missing Watch device attributes")
+            entries.append(identity)
+            runtime = associations.get(runtime_id, {})
+            if (runtime.get("isAvailable") is True and device.get("isAvailable") is True
+                    and int(runtime["version"].split(".")[0]) >= 10
+                    and device["deviceTypeIdentifier"].startswith(
+                        "com.apple.CoreSimulator.SimDeviceType.Apple-Watch-")):
+                available.add(identifier)
+    return {"runtimes": sorted(watch, key=lambda r: r["identifier"]),
+            "devices": sorted(entries, key=lambda d: (d["runtime_identifier"], d["device"]["udid"])),
+            "available_watch_udids": sorted(available)}
+
+
+class Probe:
+    def __init__(self, output, project, runner=subprocess.run):
+        self.output = Path(output)
+        self.project = Path(project)
+        self.runner = runner
+        self.report = {"schema_version": 1, "runtime_execution": "not_executed",
+                       "commands": {}, "issues": [], "configuration": {}}
+
+    def issue(self, category, message):
+        self.report["issues"].append({"category": category, "message": message})
+
+    def command(self, name, args, structured=False):
+        stdout, stderr = b"", b""
+        record = {"arguments": args, "stdout": name + ".stdout.log", "stderr": name + ".stderr.log"}
+        try:
+            result = self.runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 timeout=180, check=False)
+            stdout, stderr = result.stdout, result.stderr
+            record["returncode"] = result.returncode
+            record["status"] = "passed" if result.returncode == 0 else "command_failed"
+        except FileNotFoundError as error:
+            record.update(status="missing_tool", error=str(error))
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.stdout or b"", error.stderr or b""
+            record.update(status="timeout")
+        except OSError as error:
+            record.update(status="command_failed", error=str(error))
+        # Preserve bytes, including original line endings, before interpretation.
+        (self.output / record["stdout"]).write_bytes(stdout)
+        (self.output / record["stderr"]).write_bytes(stderr)
+        self.report["commands"][name] = record
+        if record["status"] != "passed":
+            self.issue(record["status"], name)
+            return None
+        try:
+            text = stdout.decode("utf-8-sig")
+            if not text.strip():
+                raise EvidenceError("Empty command output")
+            return json.loads(text) if structured else text
+        except (ValueError, UnicodeError) as error:
+            self.issue("malformed_output", f"{name}: {error}")
+            return None
+
+    def run(self):
+        self.output.mkdir(parents=True, exist_ok=False)
+        try:
+            self.inspect()
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as error:
+            self.issue("malformed_output", f"{type(error).__name__}: {error}")
+        except OSError as error:
+            self.issue("diagnostic_failure", str(error))
+        finally:
+            self.report["status"] = "established" if not self.report["issues"] else "not_established"
+            (self.output / "report.json").write_text(
+                json.dumps(self.report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0 if not self.report["issues"] else 1
+
+    def inspect(self):
+        for name, args, expected in (
+            ("xcode", ["xcodebuild", "-version"], r"Xcode 27\.1\s+Build version \S+"),
+            ("swift", ["xcrun", "swift", "--version"], r"Swift version \d+\.\d+"),
+            ("sdks", ["xcodebuild", "-showsdks"], r"-sdk watchsimulator\S+"),
+            ("xcodegen", ["xcodegen", "--version"], r"\d+\.\d+\.\d+"),
+        ):
+            evidence = self.command(name, args)
+            if evidence is not None:
+                self.report.setdefault("toolchain", {})[name] = evidence
+                if not re.search(expected, evidence):
+                    self.issue("missing_configuration", "Unexpected toolchain output: " + name)
+        for operation in ("list", "bootstatus", "install", "launch", "spawn", "io", "terminate", "get_app_container"):
+            self.command("simctl-help-" + operation, ["xcrun", "simctl", "help", operation])
+        runtimes = self.command("runtimes", ["xcrun", "simctl", "list", "runtimes", "--json"], True)
+        devices = self.command("devices", ["xcrun", "simctl", "list", "devices", "--json"], True)
+        eligible_inventory = set()
+        try:
+            if not isinstance(runtimes, dict) or not isinstance(devices, dict):
+                raise EvidenceError("Simulator inventory not established")
+            self.report["inventory"] = inventory(runtimes, devices)
+            eligible_inventory = set(self.report["inventory"]["available_watch_udids"])
+            if not eligible_inventory:
+                self.issue("missing_infrastructure", "No available Watch device on an installed watchOS 10+ runtime")
+        except (EvidenceError, TypeError, KeyError) as error:
+            self.issue("malformed_output", str(error))
+        base = ["xcodebuild", "-project", str(self.project)]
+        listing = self.command("schemes", base + ["-list", "-json"], True)
+        try:
+            schemes = listing["project"]["schemes"]
+            if not isinstance(schemes, list) or not all(isinstance(s, str) for s in schemes):
+                raise EvidenceError("Malformed scheme inventory")
+            self.report["schemes"] = sorted(schemes)
+            for scheme in SCHEMES:
+                if scheme not in schemes:
+                    self.issue("missing_configuration", "Missing scheme: " + scheme)
+        except (TypeError, KeyError, EvidenceError) as error:
+            self.issue("malformed_output", "Scheme inventory: " + str(error))
+        compatible = []
+        self.report["destinations"] = {}
+        for scheme in SCHEMES:
+            raw = self.command(scheme + "-destinations", base + ["-scheme", scheme,
+                               "-configuration", "Debug", "-showdestinations", "CODE_SIGNING_ALLOWED=NO"])
+            ids = set()
+            if raw is not None:
+                try:
+                    evidence = destinations(raw, scheme)
+                    self.report["destinations"][scheme] = evidence
+                    ids = set(evidence["compatible_watch_udids"])
+                except EvidenceError as error:
+                    self.issue("malformed_output", scheme + ": " + str(error))
+            if not ids:
+                self.issue("missing_infrastructure", scheme + " has no established compatible Watch destination")
+            compatible.append(ids)
+        common = sorted(eligible_inventory.intersection(*compatible))
+        self.report["common_eligible_watch_udids"] = common
+        if not common:
+            self.issue("missing_infrastructure", "No Watch UDID is available and compatible with both schemes")
+        # Inspect every common destination; never choose or boot a device.
+        for identifier in common:
+            settings = self.command("settings-" + identifier, base + ["-scheme", SCHEMES[1],
+                "-configuration", "Debug", "-sdk", "watchsimulator", "-destination",
+                "platform=watchOS Simulator,id=" + identifier, "-showBuildSettings", "-json",
+                "CODE_SIGNING_ALLOWED=NO"], True)
+            valid = False
+            if (isinstance(settings, list)
+                    and all(isinstance(s, dict) and isinstance(s.get("target"), str)
+                            and isinstance(s.get("buildSettings"), dict) for s in settings)
+                    and len({s["target"] for s in settings}) == len(settings)):
+                targets = {s.get("target"): s.get("buildSettings", {}) for s in settings if isinstance(s, dict)}
+                app, test = targets.get(SCHEMES[0], {}), targets.get(SCHEMES[1], {})
+                valid = (test.get("TEST_TARGET_NAME") == SCHEMES[0]
+                         and all(s.get("PLATFORM_NAME") == "watchsimulator"
+                                 and str(s.get("SDKROOT", "")).lower().find("watchsimulator") >= 0
+                                 and s.get("WATCHOS_DEPLOYMENT_TARGET") == "10.0"
+                                 for s in (app, test)))
+                self.report["configuration"][identifier] = {"targets": targets, "verified": valid}
+            if not valid:
+                self.issue("missing_configuration", "Watch test settings not established for " + identifier)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project", default="DaylightApp.xcodeproj")
+    parser.add_argument("--output", default="build/watch-probe", help="New evidence directory; existing evidence is never overwritten")
+    args = parser.parse_args()
+    try:
+        return Probe(args.output, args.project).run()
+    except OSError as error:
+        parser.exit(1, f"Probe evidence could not be written: {error}\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
