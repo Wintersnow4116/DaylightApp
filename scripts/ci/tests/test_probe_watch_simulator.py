@@ -147,30 +147,36 @@ class WatchProbeTests(unittest.TestCase):
             for identifier in identifiers)
         test_full = app_full.replace('"DaylightWatch"', '"DaylightWatchUITests"', 1)
         app_empty = output("DaylightWatch", PLACEHOLDER)
-        responses = {"devices": {"devices": {RUNTIME: [device(identifier) for identifier in identifiers]}},
-                     TEST_DESTINATIONS: test_full}
+        test_empty = output("DaylightWatchUITests", PLACEHOLDER)
+        responses = {"devices": {"devices": {RUNTIME: [device(identifier) for identifier in identifiers]}}}
         responses.update({"settings-" + identifier: [settings()[0]] for identifier in identifiers})
-        for first, repeat, first_count, repeat_count in (
-            (app_empty, app_full, 0, 10),
-            (app_empty, app_empty, 0, 0),
-            (app_full, app_full, 10, 10),
-            (app_full, app_empty, 10, 0),
+        for test_count, app_count, repeat_count in (
+            (10, 10, 10), (10, 0, 10), (0, 10, 10), (10, 0, 0), (10, 10, 0),
         ):
-            with self.subTest(first=first_count, repeat=repeat_count):
-                code, report, files, calls = self.run_probe(
-                    dict(responses, **{APP_DESTINATIONS: first, APP_REPEAT: repeat}))
-                expected = identifiers if first_count else []
-                self.assertEqual(code, 0 if first_count else 1)
+            with self.subTest(ui_tests=test_count, app=app_count, repeat=repeat_count):
+                ui_tests = test_full if test_count else test_empty
+                app = app_full if app_count else app_empty
+                repeat = app_full if repeat_count else app_empty
+                code, report, files, calls = self.run_probe({
+                    **responses, TEST_DESTINATIONS: ui_tests, APP_DESTINATIONS: app, APP_REPEAT: repeat})
+                expected = identifiers if test_count and app_count else []
+                self.assertEqual(code, 0 if expected else 1)
                 self.assertEqual(report["common_eligible_watch_udids"], expected)
-                self.assertEqual(report["destinations"]["DaylightWatch"]["compatible_watch_udids"], expected)
+                self.assertEqual(report["destinations"]["DaylightWatch"]["compatible_watch_udids"],
+                                 identifiers if app_count else [])
                 self.assertEqual(report["destinations"]["DaylightWatchUITests"]["compatible_watch_udids"],
-                                 identifiers)
+                                 identifiers if test_count else [])
                 self.assertEqual(report["destination_repeat"]["destinations"]["compatible_watch_udids"],
                                  identifiers if repeat_count else [])
                 self.assertEqual(report["destination_repeat"]["issues"], [])
-                self.assertEqual(files[APP_DESTINATIONS + ".stdout.log"], first.encode())
+                self.assertEqual(files[TEST_DESTINATIONS + ".stdout.log"], ui_tests.encode())
+                self.assertEqual(files[APP_DESTINATIONS + ".stdout.log"], app.encode())
                 self.assertEqual(files[APP_REPEAT + ".stdout.log"], repeat.encode())
-                self.assertEqual(sum("-showBuildSettings" in call for call in calls), 11 if first_count else 0)
+                self.assertEqual(sum("-showBuildSettings" in call for call in calls), 11 if expected else 0)
+                if expected:
+                    self.assertTrue(report["test_target_configuration"]["verified"])
+                    for identifier in expected:
+                        self.assertTrue(report["configuration"][identifier]["verified"])
 
     def test_repeat_runs_after_unparseable_first_query_without_replacing_it(self):
         code, report, files, _ = self.run_probe({APP_DESTINATIONS: "unknown header"})
@@ -218,8 +224,8 @@ class WatchProbeTests(unittest.TestCase):
                 self.assertEqual(report["destination_repeat"]["issues"][0]["category"], "malformed_output")
                 self.assertEqual(files[APP_REPEAT + ".stdout.log"], b"bad header")
 
-    def test_repeat_follows_original_pair_and_records_independent_timing_and_bytes(self):
-        keys = (APP_DESTINATIONS, TEST_DESTINATIONS, APP_REPEAT)
+    def test_ui_test_then_app_then_repeat_preserve_query_order_timing_and_bytes(self):
+        keys = (TEST_DESTINATIONS, APP_DESTINATIONS, APP_REPEAT)
         responses = {
             name: subprocess.CompletedProcess([], 0, self.responses()[name].encode(),
                                                f"{index}: raw stderr\r\n".encode() + b"\xff")
@@ -229,14 +235,19 @@ class WatchProbeTests(unittest.TestCase):
             code, report, files, calls = self.run_probe(responses)
         self.assertEqual(code, 0)
         first_index = next(index for index, call in enumerate(calls) if "-showdestinations" in call)
-        app, ui_tests, repeat = calls[first_index:first_index + 3]
-        self.assertEqual([call[call.index("-scheme") + 1] for call in (app, ui_tests, repeat)],
-                         ["DaylightWatch", "DaylightWatchUITests", "DaylightWatch"])
+        ui_tests, app, repeat = calls[first_index:first_index + 3]
+        self.assertEqual([call[call.index("-scheme") + 1] for call in (ui_tests, app, repeat)],
+                         ["DaylightWatchUITests", "DaylightWatch", "DaylightWatch"])
         self.assertEqual(app, repeat)
-        self.assertEqual([call for call in calls if "-showdestinations" in call], [app, ui_tests, repeat])
+        self.assertEqual([call for call in calls if "-showdestinations" in call], [ui_tests, app, repeat])
+        self.assertEqual(report["destination_query_order"], [
+            {"command": TEST_DESTINATIONS, "authoritative": True},
+            {"command": APP_DESTINATIONS, "authoritative": True},
+            {"command": APP_REPEAT, "authoritative": False},
+        ])
         self.assertIn("-showBuildSettings", calls[first_index + 3])
         self.assertEqual(report["destination_repeat"]["command"], APP_REPEAT)
-        for name, arguments, elapsed in zip(keys, (app, ui_tests, repeat), (1.25, 2.5, 3.75)):
+        for name, arguments, elapsed in zip(keys, (ui_tests, app, repeat), (1.25, 2.5, 3.75)):
             record = report["commands"][name]
             self.assertEqual(record["arguments"], arguments)
             self.assertEqual(datetime.fromisoformat(record["started_at_utc"]).tzinfo, timezone.utc)
@@ -312,11 +323,17 @@ class WatchProbeTests(unittest.TestCase):
             code, report, _, _ = self.run_probe({name: FileNotFoundError("Synthetic missing tool")})
             self.assertEqual(code, 1)
             self.assertEqual(report["commands"][name]["status"], "missing_tool")
-        code, report, files, _ = self.run_probe({"DaylightWatch-destinations":
-            subprocess.CompletedProcess([], 65, b"partial output\r\n", b"failure\r\n")})
-        self.assertEqual(code, 1)
-        self.assertEqual(report["commands"]["DaylightWatch-destinations"]["status"], "command_failed")
-        self.assertEqual(files["DaylightWatch-destinations.stderr.log"], b"failure\r\n")
+        for key in (TEST_DESTINATIONS, APP_DESTINATIONS):
+            with self.subTest(failed_query=key):
+                failure = subprocess.CompletedProcess([], 65, b"partial output\r\n", b"failure\r\n")
+                code, report, files, calls = self.run_probe({key: failure})
+                self.assertEqual(code, 1)
+                self.assertEqual(report["commands"][key]["status"], "command_failed")
+                self.assertIn({"category": "command_failed", "message": key}, report["issues"])
+                self.assertEqual(files[key + ".stderr.log"], failure.stderr)
+                self.assertEqual(report["destination_repeat"]["destinations"]["compatible_watch_udids"], [A])
+                self.assertEqual(report["common_eligible_watch_udids"], [])
+                self.assertFalse(any("-showBuildSettings" in call for call in calls))
 
     def test_timeout_preserves_partial_evidence(self):
         code, report, files, _ = self.run_probe({"devices": subprocess.TimeoutExpired(

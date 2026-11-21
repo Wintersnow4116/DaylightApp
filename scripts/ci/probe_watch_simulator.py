@@ -188,7 +188,7 @@ class Probe:
         self.project = Path(project)
         self.runner = runner
         self.report = {"schema_version": 1, "runtime_execution": "not_executed",
-                       "commands": {}, "issues": [], "configuration": {}}
+                       "commands": {}, "issues": [], "configuration": {}, "destination_query_order": []}
 
     def issue(self, category, message, *, diagnostic=False):
         report = self.report["destination_repeat"] if diagnostic else self.report
@@ -243,6 +243,7 @@ class Probe:
             return None
 
     def query_destinations(self, name, args, scheme, *, diagnostic=False):
+        self.report["destination_query_order"].append({"command": name, "authoritative": not diagnostic})
         raw = self.command(name, args, timed=True, diagnostic=diagnostic)
         if raw is not None:
             try:
@@ -305,13 +306,14 @@ class Probe:
             self.issue("malformed_output", "Scheme inventory: " + str(error))
         compatible = []
         self.report["destinations"] = {}
+        app_scheme, test_scheme = SCHEMES
         destination_commands = {
             scheme: base + ["-scheme", scheme, "-configuration", "Debug",
                             "-showdestinations", "CODE_SIGNING_ALLOWED=NO"]
             for scheme in SCHEMES
         }
-        for scheme, args in destination_commands.items():
-            evidence = self.query_destinations(scheme + "-destinations", args, scheme)
+        for scheme in (test_scheme, app_scheme):
+            evidence = self.query_destinations(scheme + "-destinations", destination_commands[scheme], scheme)
             ids = set()
             if evidence is not None:
                 self.report["destinations"][scheme] = evidence
@@ -321,7 +323,6 @@ class Probe:
             compatible.append(ids)
 
         # Repeat the app query for comparison only. The first pair remains authoritative.
-        app_scheme = SCHEMES[0]
         repeat_name = app_scheme + "-destinations-repeat"
         repeat = {"command": repeat_name, "issues": []}
         self.report["destination_repeat"] = repeat
