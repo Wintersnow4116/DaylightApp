@@ -1,11 +1,13 @@
 """Synthetic subprocess responses only; these are not captured Xcode evidence."""
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from probe_watch_simulator import EvidenceError, Probe, destinations, inventory
@@ -14,6 +16,10 @@ from probe_watch_simulator import EvidenceError, Probe, destinations, inventory
 A = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
 B = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
 RUNTIME = "com.apple.CoreSimulator.SimRuntime.watchOS-27-2"
+APP_DESTINATIONS = "DaylightWatch-destinations"
+TEST_DESTINATIONS = "DaylightWatchUITests-destinations"
+APP_REPEAT = "DaylightWatch-destinations-repeat"
+PLACEHOLDER = "dvtdevice-DVTiOSDeviceSimulatorPlaceholder-watchsimulator:placeholder"
 
 
 def runtime(available=True):
@@ -56,6 +62,7 @@ class WatchProbeTests(unittest.TestCase):
                 "schemes": {"project": {"schemes": ["DaylightWatch", "DaylightWatchUITests"]}},
                 "DaylightWatch-destinations": output("DaylightWatch"),
                 "DaylightWatchUITests-destinations": output("DaylightWatchUITests"),
+                APP_REPEAT: output("DaylightWatch"),
                 "settings-" + A: [settings()[0]],
                 "watch-test-target-settings": [settings()[1]]}
 
@@ -81,17 +88,28 @@ class WatchProbeTests(unittest.TestCase):
         for scheme in ("DaylightWatch", "DaylightWatchUITests"):
             commands[tuple(base + ["-scheme", scheme, "-configuration", "Debug",
                                   "-showdestinations", "CODE_SIGNING_ALLOWED=NO"])] = scheme + "-destinations"
-        for identifier in (A, B):
+        for name in responses:
+            if not name.startswith("settings-"):
+                continue
+            identifier = name.removeprefix("settings-")
             commands[tuple(base + ["-scheme", "DaylightWatchUITests", "-configuration", "Debug",
                 "-sdk", "watchsimulator", "-destination", "platform=watchOS Simulator,id=" + identifier,
-                "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO"])] = "settings-" + identifier
+                "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO"])] = name
+
+        app_queries = 0
 
         def runner(args, **kwargs):
+            nonlocal app_queries
             calls.append(args)
             self.assertIn(tuple(args), commands, "Unexpected command invocation")
             self.assertEqual(kwargs, {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
                                       "timeout": 180, "check": False})
             name = commands[tuple(args)]
+            if name == APP_DESTINATIONS:
+                app_queries += 1
+                self.assertLessEqual(app_queries, 2)
+                if app_queries == 2:
+                    name = APP_REPEAT
             self.assertIn(name, responses, "Missing explicit mocked response")
             response = responses[name]
             if isinstance(response, Exception):
@@ -121,6 +139,113 @@ class WatchProbeTests(unittest.TestCase):
             self.assertNotIn("test", args)
             self.assertNotIn("build", args)
             self.assertNotIn("generate", args)
+
+    def test_repeat_cannot_change_ten_device_authoritative_decision(self):
+        identifiers = [f"AAAAAAAA-AAAA-AAAA-AAAA-{index:012d}" for index in range(10)]
+        app_full = 'Destinations compatible with the "DaylightWatch" scheme:\r\n' + "".join(
+            f' {{ platform:watchOS Simulator, id:{identifier}, name:Synthetic Watch }}\r\n'
+            for identifier in identifiers)
+        test_full = app_full.replace('"DaylightWatch"', '"DaylightWatchUITests"', 1)
+        app_empty = output("DaylightWatch", PLACEHOLDER)
+        responses = {"devices": {"devices": {RUNTIME: [device(identifier) for identifier in identifiers]}},
+                     TEST_DESTINATIONS: test_full}
+        responses.update({"settings-" + identifier: [settings()[0]] for identifier in identifiers})
+        for first, repeat, first_count, repeat_count in (
+            (app_empty, app_full, 0, 10),
+            (app_empty, app_empty, 0, 0),
+            (app_full, app_full, 10, 10),
+            (app_full, app_empty, 10, 0),
+        ):
+            with self.subTest(first=first_count, repeat=repeat_count):
+                code, report, files, calls = self.run_probe(
+                    dict(responses, **{APP_DESTINATIONS: first, APP_REPEAT: repeat}))
+                expected = identifiers if first_count else []
+                self.assertEqual(code, 0 if first_count else 1)
+                self.assertEqual(report["common_eligible_watch_udids"], expected)
+                self.assertEqual(report["destinations"]["DaylightWatch"]["compatible_watch_udids"], expected)
+                self.assertEqual(report["destinations"]["DaylightWatchUITests"]["compatible_watch_udids"],
+                                 identifiers)
+                self.assertEqual(report["destination_repeat"]["destinations"]["compatible_watch_udids"],
+                                 identifiers if repeat_count else [])
+                self.assertEqual(report["destination_repeat"]["issues"], [])
+                self.assertEqual(files[APP_DESTINATIONS + ".stdout.log"], first.encode())
+                self.assertEqual(files[APP_REPEAT + ".stdout.log"], repeat.encode())
+                self.assertEqual(sum("-showBuildSettings" in call for call in calls), 11 if first_count else 0)
+
+    def test_repeat_runs_after_unparseable_first_query_without_replacing_it(self):
+        code, report, files, _ = self.run_probe({APP_DESTINATIONS: "unknown header"})
+        self.assertEqual(code, 1)
+        self.assertNotIn("DaylightWatch", report["destinations"])
+        self.assertEqual(report["common_eligible_watch_udids"], [])
+        self.assertTrue(any(issue["category"] == "malformed_output" for issue in report["issues"]))
+        self.assertEqual(report["destination_repeat"]["destinations"]["compatible_watch_udids"], [A])
+        self.assertEqual(files[APP_DESTINATIONS + ".stdout.log"], b"unknown header")
+
+    def test_repeat_command_failures_are_diagnostic_and_preserve_partial_output(self):
+        for response, status, returncode, stdout, stderr in (
+            (subprocess.CompletedProcess([], 65, b"partial\r\n", b"failure\xff\r\n"),
+             "command_failed", 65, b"partial\r\n", b"failure\xff\r\n"),
+            (subprocess.TimeoutExpired([], 180, output=b"partial\r\n", stderr=b"timeout\r\n"),
+             "timeout", None, b"partial\r\n", b"timeout\r\n"),
+            (FileNotFoundError("Synthetic missing executable"), "missing_tool", None, b"", b""),
+        ):
+            with self.subTest(status=status):
+                code, report, files, _ = self.run_probe({APP_REPEAT: response})
+                self.assertEqual(code, 0)
+                self.assertEqual(report["status"], "established")
+                self.assertEqual(report["common_eligible_watch_udids"], [A])
+                self.assertEqual(report["issues"], [])
+                self.assertEqual(report["destination_repeat"]["issues"],
+                                 [{"category": status, "message": APP_REPEAT}])
+                self.assertNotIn("destinations", report["destination_repeat"])
+                record = report["commands"][APP_REPEAT]
+                self.assertEqual(record["status"], status)
+                self.assertEqual(record.get("returncode"), returncode)
+                self.assertEqual(files[record["stdout"]], stdout)
+                self.assertEqual(files[record["stderr"]], stderr)
+
+    def test_malformed_repeat_is_reported_separately_from_authoritative_errors(self):
+        placeholder = output("DaylightWatch", PLACEHOLDER)
+        for first, expected_code in ((output("DaylightWatch"), 0), (placeholder, 1)):
+            with self.subTest(expected_code=expected_code):
+                baseline_code, baseline, _, _ = self.run_probe({APP_DESTINATIONS: first})
+                self.assertEqual(baseline_code, expected_code)
+                code, report, files, _ = self.run_probe({APP_DESTINATIONS: first, APP_REPEAT: "bad header"})
+                self.assertEqual(code, expected_code)
+                self.assertEqual(report["issues"], baseline["issues"])
+                self.assertEqual(report["common_eligible_watch_udids"], baseline["common_eligible_watch_udids"])
+                self.assertNotIn("destinations", report["destination_repeat"])
+                self.assertEqual(report["destination_repeat"]["issues"][0]["category"], "malformed_output")
+                self.assertEqual(files[APP_REPEAT + ".stdout.log"], b"bad header")
+
+    def test_repeat_follows_original_pair_and_records_independent_timing_and_bytes(self):
+        keys = (APP_DESTINATIONS, TEST_DESTINATIONS, APP_REPEAT)
+        responses = {
+            name: subprocess.CompletedProcess([], 0, self.responses()[name].encode(),
+                                               f"{index}: raw stderr\r\n".encode() + b"\xff")
+            for index, name in enumerate(keys)
+        }
+        with patch("probe_watch_simulator.monotonic", side_effect=[10, 11.25, 40, 42.5, 100, 103.75]):
+            code, report, files, calls = self.run_probe(responses)
+        self.assertEqual(code, 0)
+        first_index = next(index for index, call in enumerate(calls) if "-showdestinations" in call)
+        app, ui_tests, repeat = calls[first_index:first_index + 3]
+        self.assertEqual([call[call.index("-scheme") + 1] for call in (app, ui_tests, repeat)],
+                         ["DaylightWatch", "DaylightWatchUITests", "DaylightWatch"])
+        self.assertEqual(app, repeat)
+        self.assertEqual([call for call in calls if "-showdestinations" in call], [app, ui_tests, repeat])
+        self.assertIn("-showBuildSettings", calls[first_index + 3])
+        self.assertEqual(report["destination_repeat"]["command"], APP_REPEAT)
+        for name, arguments, elapsed in zip(keys, (app, ui_tests, repeat), (1.25, 2.5, 3.75)):
+            record = report["commands"][name]
+            self.assertEqual(record["arguments"], arguments)
+            self.assertEqual(datetime.fromisoformat(record["started_at_utc"]).tzinfo, timezone.utc)
+            self.assertEqual(record["elapsed_seconds"], elapsed)
+            self.assertEqual(record["returncode"], 0)
+            self.assertEqual(record["stdout"], name + ".stdout.log")
+            self.assertEqual(record["stderr"], name + ".stderr.log")
+            self.assertEqual(files[record["stdout"]], responses[name].stdout)
+            self.assertEqual(files[record["stderr"]], responses[name].stderr)
 
     def test_multiple_devices_and_unavailable_reasons_retained(self):
         data = inventory({"runtimes": [runtime()]},

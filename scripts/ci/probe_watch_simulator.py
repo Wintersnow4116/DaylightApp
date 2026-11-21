@@ -7,10 +7,12 @@ never evidence that an application or test actually executed.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 import subprocess
+from time import monotonic
 from uuid import UUID
 
 
@@ -188,12 +190,16 @@ class Probe:
         self.report = {"schema_version": 1, "runtime_execution": "not_executed",
                        "commands": {}, "issues": [], "configuration": {}}
 
-    def issue(self, category, message):
-        self.report["issues"].append({"category": category, "message": message})
+    def issue(self, category, message, *, diagnostic=False):
+        report = self.report["destination_repeat"] if diagnostic else self.report
+        report["issues"].append({"category": category, "message": message})
 
-    def command(self, name, args, structured=False):
+    def command(self, name, args, structured=False, *, timed=False, diagnostic=False):
         stdout, stderr = b"", b""
         record = {"arguments": args, "stdout": name + ".stdout.log", "stderr": name + ".stderr.log"}
+        if timed:
+            record["started_at_utc"] = datetime.now(timezone.utc).isoformat()
+            started = monotonic()
         try:
             result = self.runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  timeout=180, check=False)
@@ -207,12 +213,15 @@ class Probe:
             record.update(status="timeout")
         except OSError as error:
             record.update(status="command_failed", error=str(error))
+        finally:
+            if timed:
+                record["elapsed_seconds"] = monotonic() - started
         # Preserve bytes, including original line endings, before interpretation.
+        self.report["commands"][name] = record
         (self.output / record["stdout"]).write_bytes(stdout)
         (self.output / record["stderr"]).write_bytes(stderr)
-        self.report["commands"][name] = record
         if record["status"] != "passed":
-            self.issue(record["status"], name)
+            self.issue(record["status"], name, diagnostic=diagnostic)
             return None
         try:
             # Only simctl help may supply its evidence on stderr. Validate the
@@ -230,8 +239,17 @@ class Probe:
                 raise EvidenceError("Empty command output")
             return json.loads(text) if structured else text
         except (ValueError, UnicodeError) as error:
-            self.issue("malformed_output", f"{name}: {error}")
+            self.issue("malformed_output", f"{name}: {error}", diagnostic=diagnostic)
             return None
+
+    def query_destinations(self, name, args, scheme, *, diagnostic=False):
+        raw = self.command(name, args, timed=True, diagnostic=diagnostic)
+        if raw is not None:
+            try:
+                return destinations(raw, scheme)
+            except EvidenceError as error:
+                self.issue("malformed_output", f"{scheme}: {error}", diagnostic=diagnostic)
+        return None
 
     def run(self):
         self.output.mkdir(parents=True, exist_ok=False)
@@ -287,20 +305,34 @@ class Probe:
             self.issue("malformed_output", "Scheme inventory: " + str(error))
         compatible = []
         self.report["destinations"] = {}
-        for scheme in SCHEMES:
-            raw = self.command(scheme + "-destinations", base + ["-scheme", scheme,
-                               "-configuration", "Debug", "-showdestinations", "CODE_SIGNING_ALLOWED=NO"])
+        destination_commands = {
+            scheme: base + ["-scheme", scheme, "-configuration", "Debug",
+                            "-showdestinations", "CODE_SIGNING_ALLOWED=NO"]
+            for scheme in SCHEMES
+        }
+        for scheme, args in destination_commands.items():
+            evidence = self.query_destinations(scheme + "-destinations", args, scheme)
             ids = set()
-            if raw is not None:
-                try:
-                    evidence = destinations(raw, scheme)
-                    self.report["destinations"][scheme] = evidence
-                    ids = set(evidence["compatible_watch_udids"])
-                except EvidenceError as error:
-                    self.issue("malformed_output", scheme + ": " + str(error))
+            if evidence is not None:
+                self.report["destinations"][scheme] = evidence
+                ids = set(evidence["compatible_watch_udids"])
             if not ids:
                 self.issue("missing_infrastructure", scheme + " has no established compatible Watch destination")
             compatible.append(ids)
+
+        # Repeat the app query for comparison only. The first pair remains authoritative.
+        app_scheme = SCHEMES[0]
+        repeat_name = app_scheme + "-destinations-repeat"
+        repeat = {"command": repeat_name, "issues": []}
+        self.report["destination_repeat"] = repeat
+        try:
+            evidence = self.query_destinations(repeat_name, destination_commands[app_scheme],
+                                               app_scheme, diagnostic=True)
+            if evidence is not None:
+                repeat["destinations"] = evidence
+        except OSError as error:
+            self.issue("diagnostic_failure", f"{repeat_name}: {error}", diagnostic=True)
+
         common = sorted(eligible_inventory.intersection(*compatible))
         self.report["common_eligible_watch_udids"] = common
         if not common:
