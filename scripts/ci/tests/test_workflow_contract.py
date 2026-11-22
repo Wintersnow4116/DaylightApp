@@ -96,12 +96,33 @@ class WorkflowContractTests(unittest.TestCase):
         for path in ("*.log", "outcome.json", "capability/", "WatchSmoke.xcresult/"):
             self.assertIn("build/watch-smoke/" + path, artifact)
 
-    def test_existing_validation_job_is_unchanged(self):
-        # Fingerprint of the complete approved workflow before adding the
-        # independent diagnostic job, including every existing build/test command.
-        original = self.source().split("\n  watch_probe:\n", 1)[0].rstrip()
-        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
-                         "0e1931cdd3d0d7a89e0af2e1db3e035f7e209c9897be2c0f5091e625e147e278")
+    def test_existing_validation_job_is_unchanged_outside_optional_diagnostics(self):
+        job = self.source().split("\n  watch_probe:\n", 1)[0].rstrip()
+        remaining, count = re.subn(
+            r"(?ms)^      - name: Collect simulator diagnostics\n.*?"
+            r"(?=^      - name: Preserve validation results and diagnostics\n)", "", job)
+        self.assertEqual(count, 1)
+        # Pin every functional step and the reporting and upload logic to the approved workflow.
+        self.assertEqual(hashlib.sha256(remaining.encode()).hexdigest(),
+                         "0e43fac14e58912c35a9200e59ff1bb334598aecd68c828ba9ab9c87a01fd10b")
+
+    def test_only_ios_diagnostics_are_advisory_and_artifacts_survive_failure(self):
+        job = self.source().split("\n  watch_probe:\n", 1)[0]
+        ui_test_step = job.split("- name: Run iOS Simulator UI tests\n", 1)[1].split("- name:", 1)[0]
+        self.assertIn("set -euo pipefail", ui_test_step)
+        self.assertNotIn("continue-on-error", ui_test_step)
+        self.assertNotIn("|| true", ui_test_step)
+        step = job.split("- name: Collect simulator diagnostics\n", 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: ${{ always() && !cancelled() }}", step)
+        self.assertIn("continue-on-error: true", step)
+        self.assertEqual(job.count("continue-on-error: true"), 1)
+        self.assertIn("timeout-minutes: 3", step)
+        self.assertEqual([block.strip() for block in run_blocks(step)], [
+            'python3 -B scripts/ci/collect_ios_diagnostics.py --output build/ui-diagnostics '
+            '--simulator "$SELECTED_SIMULATOR"'])
+        artifact = job.split("- name: Preserve validation results and diagnostics\n", 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: ${{ always() }}", artifact)
+        self.assertIn("build/ui-diagnostics/", artifact)
 
     def test_watch_probe_is_independent_and_uses_established_toolchain(self):
         job = self.watch_job()

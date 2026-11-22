@@ -199,19 +199,12 @@ jobs:
 
       - name: Collect simulator diagnostics
         if: ${{ always() && !cancelled() }}
+        continue-on-error: true
         timeout-minutes: 3
         env:
           SELECTED_SIMULATOR: ${{ steps.simulator.outputs.udid }}
         run: |
-          mkdir -p build/ui-diagnostics
-          xcodebuild -version > build/ui-diagnostics/xcode-version.log 2>&1 || true
-          xcrun simctl list --json > build/ui-diagnostics/simulator-final-state.json 2>&1 || true
-          if [ -n "$SELECTED_SIMULATOR" ]; then
-            xcrun simctl io "$SELECTED_SIMULATOR" screenshot build/ui-diagnostics/simulator-final.png || true
-            xcrun simctl spawn "$SELECTED_SIMULATOR" log show --last 10m --style compact \
-              --predicate 'process == "DaylightIOS" OR process CONTAINS "DaylightUITests"' \
-              > build/ui-diagnostics/simulator-app.log 2>&1 || true
-          fi
+          python3 -B scripts/ci/collect_ios_diagnostics.py --output build/ui-diagnostics --simulator "$SELECTED_SIMULATOR"
 
       - name: Preserve validation results and diagnostics
         id: artifacts
