@@ -264,7 +264,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   watch_probe:
-    name: Watch Simulator capability probe (diagnostic only)
+    name: Watch Simulator capability gate (configuration only)
     runs-on: xcode-27
     timeout-minutes: 30
     env:

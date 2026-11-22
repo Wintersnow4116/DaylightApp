@@ -93,6 +93,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_watch_probe_is_independent_and_uses_established_toolchain(self):
         job = self.watch_job()
         header = job.split("    steps:", 1)[0]
+        self.assertIn("name: Watch Simulator capability gate (configuration only)", header)
         self.assertIn("runs-on: xcode-27", header)
         self.assertIn("DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer", header)
         self.assertRegex(header, r"timeout-minutes: [1-9][0-9]*")

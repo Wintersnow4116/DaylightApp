@@ -194,7 +194,8 @@ class Probe:
         report = self.report[diagnostic] if diagnostic is not None else self.report
         report["issues"].append({"category": category, "message": message})
 
-    def command(self, name, args, structured=False, *, timed=False, diagnostic=None):
+    def command(self, name, args, structured=False, *, timed=False, diagnostic=None,
+                watch_destination=None):
         stdout, stderr = b"", b""
         record = {"arguments": args, "stdout": name + ".stdout.log", "stderr": name + ".stderr.log"}
         if timed:
@@ -221,6 +222,15 @@ class Probe:
         (self.output / record["stdout"]).write_bytes(stdout)
         (self.output / record["stderr"]).write_bytes(stderr)
         if record["status"] != "passed":
+            # Xcode can reject one listed destination while other candidates still resolve.
+            missing_destination = (b"Could not configure request to show build settings: "
+                                   b"Unable to find a device matching the provided destination specifier:")
+            if (watch_destination is not None and record.get("returncode") == 64
+                    and missing_destination in stderr
+                    and f"{{ platform:watchOS Simulator, id:{watch_destination} }}".encode("ascii") in stderr
+                    and b"no available devices matched the request" in stderr):
+                record["failure_reason"] = "destination_unavailable"
+                return None
             self.issue(record["status"], name, diagnostic=diagnostic)
             return None
         try:
@@ -361,20 +371,36 @@ class Probe:
                 self.report["test_target_configuration"].update(settings=test_settings, verified=True)
             except EvidenceError as error:
                 self.issue("missing_configuration", str(error))
-        # Inspect every common destination; never choose or boot a device.
+        # Inspect every common destination. The configuration gate needs one verified Watch.
+        verified = self.report["verified_watch_udids"] = []
         for identifier in common:
-            settings = self.command("settings-" + identifier, base + ["-scheme", SCHEMES[1],
-                "-configuration", "Debug", "-sdk", "watchsimulator", "-destination",
-                "platform=watchOS Simulator,id=" + identifier, "-showBuildSettings", "-json",
-                "CODE_SIGNING_ALLOWED=NO"], True)
-            evidence = {"application_command": "settings-" + identifier,
+            command_name = "settings-" + identifier
+            settings = self.command(command_name, base + ["-scheme", SCHEMES[1], "-configuration", "Debug",
+                "-sdk", "watchsimulator", "-destination", "platform=watchOS Simulator,id=" + identifier,
+                "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO"], True,
+                timed=True, watch_destination=identifier)
+            evidence = {"application_command": command_name,
                         "test_target_command": "watch-test-target-settings", "verified": False}
             self.report["configuration"][identifier] = evidence
+            if self.report["commands"][command_name].get("failure_reason") == "destination_unavailable":
+                evidence["destination_issue"] = "destination_unavailable"
+                continue
             try:
-                evidence["application_settings"] = resolved_settings(settings, SCHEMES[0])
-                evidence["verified"] = test_settings is not None
+                application_settings = resolved_settings(settings, SCHEMES[0])
+                evidence["application_settings"] = application_settings
+                device_id = application_settings.get("TARGET_DEVICE_IDENTIFIER")
+                device_platform = application_settings.get("TARGET_DEVICE_PLATFORM_NAME")
+                if not isinstance(device_platform, str) or not device_platform:
+                    raise EvidenceError("Missing or invalid TARGET_DEVICE_PLATFORM_NAME")
+                if uuid(device_id) != identifier or device_platform != "watchsimulator":
+                    evidence["destination_issue"] = "destination_mismatch"
+                elif test_settings is not None:
+                    evidence["verified"] = True
+                    verified.append(identifier)
             except EvidenceError as error:
                 self.issue("missing_configuration", identifier + ": " + str(error))
+        if common and not verified:
+            self.issue("missing_configuration", "No common Watch destination passed Build Settings verification")
 
 
 def main():

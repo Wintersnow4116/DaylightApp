@@ -43,14 +43,23 @@ def output(scheme, identifier=A, legacy=False):
             f' {{ platform:watchOS Simulator, id:{B}, name:Unavailable, error:runtime missing }}\r\n')
 
 
-def settings():
+def settings(identifier=A):
     return [{"target": name, "buildSettings": {
         "TARGET_NAME": name,
         "PRODUCT_TYPE": "com.apple.product-type.application" if name == "DaylightWatch" else "com.apple.product-type.bundle.ui-testing",
-        **({"TEST_TARGET_NAME": "DaylightWatch"} if name == "DaylightWatchUITests" else {}),
+        **({"TEST_TARGET_NAME": "DaylightWatch"} if name == "DaylightWatchUITests" else
+           {"TARGET_DEVICE_IDENTIFIER": identifier, "TARGET_DEVICE_PLATFORM_NAME": "watchsimulator"}),
         "PLATFORM_NAME": "watchsimulator",
         "SDKROOT": "watchsimulator27.0", "WATCHOS_DEPLOYMENT_TARGET": "10.0"}}
         for name in ("DaylightWatch", "DaylightWatchUITests")]
+
+
+def unavailable_settings(identifier, returncode=64):
+    stderr = ("xcodebuild: error: Could not configure request to show build settings: "
+              "Unable to find a device matching the provided destination specifier:\r\n"
+              f"\t\t{{ platform:watchOS Simulator, id:{identifier} }}\r\n\r\n"
+              "\tThe requested device could not be found because no available devices matched the request.\r\n")
+    return subprocess.CompletedProcess([], returncode, b"", stderr.encode())
 
 
 class WatchProbeTests(unittest.TestCase):
@@ -157,7 +166,7 @@ class WatchProbeTests(unittest.TestCase):
         app_empty = output("DaylightWatch", PLACEHOLDER)
         test_empty = output("DaylightWatchUITests", PLACEHOLDER)
         responses = {"devices": {"devices": {RUNTIME: [device(identifier) for identifier in identifiers]}}}
-        responses.update({"settings-" + identifier: [settings()[0]] for identifier in identifiers})
+        responses.update({"settings-" + identifier: [settings(identifier)[0]] for identifier in identifiers})
         for preflight_count, test_count, app_count, repeat_count in (
             (0, 10, 10, 10), (10, 10, 10, 10), (10, 0, 10, 10),
             (10, 10, 0, 10), (0, 0, 10, 10), (10, 10, 0, 0), (10, 10, 10, 0),
@@ -262,7 +271,8 @@ class WatchProbeTests(unittest.TestCase):
                                                f"{index}: raw stderr\r\n".encode() + b"\xff")
             for index, name in enumerate(keys)
         }
-        with patch("probe_watch_simulator.monotonic", side_effect=[0, 0.5, 10, 11.25, 40, 42.5, 100, 103.75]):
+        with patch("probe_watch_simulator.monotonic",
+                   side_effect=[0, 0.5, 10, 11.25, 40, 42.5, 100, 103.75, 110, 111]):
             code, report, files, calls = self.run_probe(responses)
         self.assertEqual(code, 0)
         first_index = next(index for index, call in enumerate(calls) if "-showdestinations" in call)
@@ -312,19 +322,80 @@ class WatchProbeTests(unittest.TestCase):
                                  {"command": TEST_PREFLIGHT, "authoritative": False})
                 self.assertEqual(report["destination_preflight"]["destinations"]["compatible_watch_udids"], [A])
 
-    def test_all_common_devices_are_inspected_without_selection(self):
+    def two_device_responses(self):
         additions = {"devices": {"devices": {RUNTIME: [device(), device(B)]}},
-                     "settings-" + B: [settings()[0]]}
+                     "settings-" + B: [settings(B)[0]]}
         for scheme in ("DaylightWatch", "DaylightWatchUITests"):
             additions[scheme + "-destinations"] = (
                 f'Destinations compatible with the "{scheme}" scheme:\r\n'
                 f' {{ platform:watchOS Simulator, id:{A}, name:First synthetic Watch }}\r\n'
                 f' {{ platform:watchOS Simulator, id:{B}, name:Second synthetic Watch }}\r\n')
-        code, report, _, calls = self.run_probe(additions)
+        return additions
+
+    def test_all_common_devices_are_inspected_without_selection(self):
+        code, report, _, calls = self.run_probe(self.two_device_responses())
         self.assertEqual(code, 0)
         self.assertEqual(report["common_eligible_watch_udids"], [A, B])
+        self.assertEqual(report["verified_watch_udids"], [A, B])
         self.assertEqual(set(report["configuration"]), {A, B})
         self.assertEqual(sum("-showBuildSettings" in call for call in calls), 3)
+
+    def test_one_verified_watch_passes_and_preserves_other_destination_rejection(self):
+        responses = self.two_device_responses()
+        command_name = "settings-" + B
+        rejected = unavailable_settings(B)
+        responses[command_name] = rejected
+        code, report, files, _ = self.run_probe(responses)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["common_eligible_watch_udids"], [A, B])
+        self.assertEqual(report["verified_watch_udids"], [A])
+        self.assertFalse(report["configuration"][B]["verified"])
+        self.assertEqual(report["configuration"][B]["destination_issue"], "destination_unavailable")
+        record = report["commands"][command_name]
+        self.assertEqual(record["status"], "command_failed")
+        self.assertEqual(record["returncode"], 64)
+        self.assertEqual(files[record["stdout"]], rejected.stdout)
+        self.assertEqual(files[record["stderr"]], rejected.stderr)
+
+    def test_no_verified_watch_fails_after_destination_rejections(self):
+        responses = {**self.two_device_responses(), "settings-" + A: unavailable_settings(A),
+                     "settings-" + B: unavailable_settings(B)}
+        code, report, _, _ = self.run_probe(responses)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verified_watch_udids"], [])
+        self.assertTrue(report["test_target_configuration"]["verified"])
+        self.assertIn("No common Watch destination passed Build Settings verification",
+                      [issue["message"] for issue in report["issues"]])
+
+    def test_successful_settings_for_an_iphone_or_another_watch_do_not_verify_requested_watch(self):
+        for platform in ("iphonesimulator", "watchsimulator"):
+            with self.subTest(platform=platform):
+                app = settings(B)[0]
+                app["buildSettings"]["TARGET_DEVICE_PLATFORM_NAME"] = platform
+                responses = {**self.two_device_responses(), "settings-" + A: [app]}
+                code, report, files, _ = self.run_probe(responses)
+                self.assertEqual(code, 0)
+                self.assertEqual(report["verified_watch_udids"], [B])
+                evidence = report["configuration"][A]
+                self.assertFalse(evidence["verified"])
+                self.assertEqual(evidence["destination_issue"], "destination_mismatch")
+                self.assertEqual(evidence["application_settings"], app["buildSettings"])
+                self.assertEqual(json.loads(files["settings-" + A + ".stdout.log"]), [app])
+                code, report, _, _ = self.run_probe({"settings-" + A: [app]})
+                self.assertEqual(code, 1)
+                self.assertEqual(report["verified_watch_udids"], [])
+
+    def test_other_settings_failures_still_block_with_a_verified_watch(self):
+        for failure in (unavailable_settings(A), unavailable_settings(B, returncode=65),
+                        subprocess.CompletedProcess([], 64, b"", b"package resolution failed"),
+                        [], [{"target": "DaylightWatch", "buildSettings": {
+                            **settings(B)[0]["buildSettings"], "TARGET_DEVICE_IDENTIFIER": None}}]):
+            with self.subTest(failure=failure):
+                code, report, _, _ = self.run_probe({**self.two_device_responses(), "settings-" + B: failure})
+                self.assertEqual(code, 1)
+                self.assertEqual(report["verified_watch_udids"], [A])
+                self.assertFalse(report["configuration"][B]["verified"])
+                self.assertNotIn("destination_issue", report["configuration"][B])
 
     def test_missing_scheme_fails_even_when_destination_query_succeeds(self):
         code, report, _, _ = self.run_probe({"schemes": {"project": {"schemes": ["DaylightWatch"]}}})
