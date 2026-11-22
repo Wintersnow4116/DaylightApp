@@ -81,7 +81,20 @@ class WorkflowContractTests(unittest.TestCase):
     def watch_job(self):
         source = self.source()
         self.assertEqual(source.count("\n  watch_probe:\n"), 1)
-        return source.split("\n  watch_probe:\n", 1)[1]
+        return source.split("\n  watch_probe:\n", 1)[1].split("\n  watch_smoke:\n", 1)[0]
+
+    def test_watch_smoke_runs_independently_and_preserves_evidence(self):
+        source = self.source()
+        self.assertEqual(source.count("\n  watch_smoke:\n"), 1)
+        job = source.split("\n  watch_smoke:\n", 1)[1]
+        self.assertNotRegex(job, r"(?m)^\s*(needs|continue-on-error):")
+        self.assertIn("runs-on: xcode-27", job)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer", job)
+        self.assertIn("python3 -B scripts/ci/run_watch_smoke.py --output build/watch-smoke", job)
+        artifact = job.split("- name: Preserve Watch UI smoke evidence", 1)[1]
+        self.assertIn("if: ${{ always() }}", artifact)
+        for path in ("*.log", "outcome.json", "capability/", "WatchSmoke.xcresult/"):
+            self.assertIn("build/watch-smoke/" + path, artifact)
 
     def test_existing_validation_job_is_unchanged(self):
         # Fingerprint of the complete approved workflow before adding the

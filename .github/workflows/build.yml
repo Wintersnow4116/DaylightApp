@@ -317,3 +317,47 @@ jobs:
             build/watch-probe-setup/
           if-no-files-found: warn
           retention-days: 7
+
+  watch_smoke:
+    name: Watch Simulator UI smoke
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare XcodeGen
+        run: |
+          set -euo pipefail
+          mkdir -p build/watch-smoke-setup
+          trap 'code=$?; printf "{\"stage\":\"xcodegen_setup\",\"status\":\"failed\",\"exit_code\":%s}\n" "$code" > build/watch-smoke-setup/outcome.json; exit "$code"' ERR
+          if ! command -v xcodegen > /dev/null 2>&1; then
+            brew install xcodegen 2>&1 | tee build/watch-smoke-setup/xcodegen-install.log
+          fi
+          xcodegen --version | tee build/watch-smoke-setup/xcodegen-version.log
+
+      - name: Run one Watch Simulator UI smoke test
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/run_watch_smoke.py --output build/watch-smoke
+
+      - name: Preserve Watch UI smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: daylight-watch-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/watch-smoke-setup/
+            build/watch-smoke/*.log
+            build/watch-smoke/outcome.json
+            build/watch-smoke/capability/
+            build/watch-smoke/WatchSmoke.xcresult/
+          if-no-files-found: warn
+          retention-days: 7
