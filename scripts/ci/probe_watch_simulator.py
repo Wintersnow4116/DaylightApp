@@ -190,11 +190,11 @@ class Probe:
         self.report = {"schema_version": 1, "runtime_execution": "not_executed",
                        "commands": {}, "issues": [], "configuration": {}, "destination_query_order": []}
 
-    def issue(self, category, message, *, diagnostic=False):
-        report = self.report["destination_repeat"] if diagnostic else self.report
+    def issue(self, category, message, *, diagnostic=None):
+        report = self.report[diagnostic] if diagnostic is not None else self.report
         report["issues"].append({"category": category, "message": message})
 
-    def command(self, name, args, structured=False, *, timed=False, diagnostic=False):
+    def command(self, name, args, structured=False, *, timed=False, diagnostic=None):
         stdout, stderr = b"", b""
         record = {"arguments": args, "stdout": name + ".stdout.log", "stderr": name + ".stderr.log"}
         if timed:
@@ -242,8 +242,9 @@ class Probe:
             self.issue("malformed_output", f"{name}: {error}", diagnostic=diagnostic)
             return None
 
-    def query_destinations(self, name, args, scheme, *, diagnostic=False):
-        self.report["destination_query_order"].append({"command": name, "authoritative": not diagnostic})
+    def query_destinations(self, name, args, scheme, *, diagnostic=None):
+        self.report["destination_query_order"].append(
+            {"command": name, "authoritative": diagnostic is None})
         raw = self.command(name, args, timed=True, diagnostic=diagnostic)
         if raw is not None:
             try:
@@ -251,6 +252,16 @@ class Probe:
             except EvidenceError as error:
                 self.issue("malformed_output", f"{scheme}: {error}", diagnostic=diagnostic)
         return None
+
+    def record_destination_diagnostic(self, key, name, args, scheme):
+        report = {"command": name, "issues": []}
+        self.report[key] = report
+        try:
+            evidence = self.query_destinations(name, args, scheme, diagnostic=key)
+            if evidence is not None:
+                report["destinations"] = evidence
+        except OSError as error:
+            self.issue("diagnostic_failure", f"{name}: {error}", diagnostic=key)
 
     def run(self):
         self.output.mkdir(parents=True, exist_ok=False)
@@ -312,6 +323,9 @@ class Probe:
                             "-showdestinations", "CODE_SIGNING_ALLOWED=NO"]
             for scheme in SCHEMES
         }
+        self.record_destination_diagnostic(
+            "destination_preflight", test_scheme + "-destinations-preflight",
+            destination_commands[test_scheme], test_scheme)
         for scheme in (test_scheme, app_scheme):
             evidence = self.query_destinations(scheme + "-destinations", destination_commands[scheme], scheme)
             ids = set()
@@ -322,17 +336,10 @@ class Probe:
                 self.issue("missing_infrastructure", scheme + " has no established compatible Watch destination")
             compatible.append(ids)
 
-        # Repeat the app query for comparison only. The first pair remains authoritative.
-        repeat_name = app_scheme + "-destinations-repeat"
-        repeat = {"command": repeat_name, "issues": []}
-        self.report["destination_repeat"] = repeat
-        try:
-            evidence = self.query_destinations(repeat_name, destination_commands[app_scheme],
-                                               app_scheme, diagnostic=True)
-            if evidence is not None:
-                repeat["destinations"] = evidence
-        except OSError as error:
-            self.issue("diagnostic_failure", f"{repeat_name}: {error}", diagnostic=True)
+        # Repeat the app query for comparison only. Only the two scheme queries above add eligible IDs.
+        self.record_destination_diagnostic(
+            "destination_repeat", app_scheme + "-destinations-repeat",
+            destination_commands[app_scheme], app_scheme)
 
         common = sorted(eligible_inventory.intersection(*compatible))
         self.report["common_eligible_watch_udids"] = common
